@@ -18,27 +18,27 @@ This sub directory should be built alongside the normal llama.cpp
 
 Here is an example how this config file should look like:
 
-{
-    "seeds":[
-        324932, 39292, 190192, 12912,
-        1337, 31337,
-        1, 2, 3, 4, 5, 6, 7
-    ],
-    "prompt_tests":[
-        {"id":"04_stressed", "replacements": [
-            ["<STATEMENT>", "I get stressed out easily."],
-            ["<TRUEFACT>", "I like to watch sci-fi."]]
-        },
-        {"id":"01_life_party", "replacements": [
-            ["<STATEMENT>", "I am the life of the party."],
-            ["<TRUEFACT>", "I like to watch sci-fi."]]
-        },
-        {"id":"09_relaxed", "replacements": [
-            ["<STATEMENT>", "I am relaxed most of the time."],
-            ["<TRUEFACT>", "I like to watch sci-fi."]]
-        }
-    ]
-}
+    {
+        "seeds":[
+            324932, 39292, 190192, 12912,
+            1337, 31337,
+            1, 2, 3, 4, 5, 6, 7
+        ],
+        "prompt_tests":[
+            {"id":"04_stressed", "replacements": [
+                ["<STATEMENT>", "I get stressed out easily."],
+                ["<TRUEFACT>", "I like to watch sci-fi."]]
+            },
+            {"id":"01_life_party", "replacements": [
+                ["<STATEMENT>", "I am the life of the party."],
+                ["<TRUEFACT>", "I like to watch sci-fi."]]
+            },
+            {"id":"09_relaxed", "replacements": [
+                ["<STATEMENT>", "I am relaxed most of the time."],
+                ["<TRUEFACT>", "I like to watch sci-fi."]]
+            }
+        ]
+    }
 
 `"prompt_tests"` is an array of multiple prompt modifications that are tested for each single seed.
 The `"id"` is used to identify the test in the generated `result_<timestamp>.json`.
