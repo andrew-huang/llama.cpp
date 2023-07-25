@@ -5,7 +5,7 @@ It collects the responses in a common output file.
 
 The configuration is the prompt\_runner\_config.json which needs to be in the current working directory.
 
-    $ ./weicon -m <model-file> -n 100 -c 2048 --temp 0.2 -f <prompt-file>
+    llama.cpp$ ./prompt_runner -m <model-file> -n 100 -c 2048 --temp 0.2 -f <prompt-file>
 
 After finished running, it will generate a `result_<timestamp>.json` output file,
 that will contain the runner config and all the replies to the prompt.
