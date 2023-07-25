@@ -24,18 +24,18 @@ Here is an example how this config file should look like:
             1337, 31337,
             1, 2, 3, 4, 5, 6, 7
         ],
+        "replacements":[
+            ["<TRUEFACT>", "I like to watch sci-fi."]
+        ],
         "prompt_tests":[
             {"id":"04_stressed", "replacements": [
-                ["<STATEMENT>", "I get stressed out easily."],
-                ["<TRUEFACT>", "I like to watch sci-fi."]]
+                ["<STATEMENT>", "I get stressed out easily."]]
             },
             {"id":"01_life_party", "replacements": [
-                ["<STATEMENT>", "I am the life of the party."],
-                ["<TRUEFACT>", "I like to watch sci-fi."]]
+                ["<STATEMENT>", "I am the life of the party."]]
             },
             {"id":"09_relaxed", "replacements": [
-                ["<STATEMENT>", "I am relaxed most of the time."],
-                ["<TRUEFACT>", "I like to watch sci-fi."]]
+                ["<STATEMENT>", "I am relaxed most of the time."]]
             }
         ]
     }
