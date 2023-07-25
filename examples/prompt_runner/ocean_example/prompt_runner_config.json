@@ -1,0 +1,11 @@
+{"seeds":[1],
+"sample_seeds":[324932,39292,190192,12912,1337,31337,1,2,3,4,5,6,7],
+"replacements":[["<TRUEFACT>", "I like to watch sci-fi."]],
+"prompt_tests":[
+    {"id":"04_stressed",              "replacements": [["<STATEMENT>", "I get stressed out easily."]]},
+    {"id":"01_life_party",            "replacements": [["<STATEMENT>", "I am the life of the party."]]},
+    {"id":"09_relaxed",               "replacements": [["<STATEMENT>", "I am relaxed most of the time."]]},
+    {"id":"22_no_other_ppl_problems", "replacements": [["<STATEMENT>", "I am not interested in other people's problems."]]},
+    {"id":"40_diffi_words",           "replacements": [["<STATEMENT>", "I use difficult words."]]},
+    {"id":"31_talk_ppl_party",        "replacements": [["<STATEMENT>", "I talk to a lot of different people at parties."]]}
+]}

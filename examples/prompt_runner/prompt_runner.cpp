@@ -54,6 +54,28 @@ void sigint_handler(int signo) {
 }
 #endif
 
+json make_response(std::vector<std::string> &responses, const std::string &test_id, int64_t seed, const std::vector<llama_token> &embd_gen) {
+    llama_context *ctx = *g_ctx;
+
+    std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
+    std::string gen = "";
+    for (auto id : embd_gen) {
+        gen += llama_token_to_str(ctx, id);
+    }
+    printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
+    fflush(stdout);
+
+    responses.push_back(gen_prefix + gen);
+
+    json single_response;
+    single_response["test_id"] = test_id;
+    single_response["seed"] = seed;
+    single_response["response"] = gen;
+
+    return single_response;
+}
+
+
 int main(int argc, char ** argv) {
     gpt_params params;
 
@@ -201,6 +223,12 @@ int main(int argc, char ** argv) {
 
     bool first = true;
 
+    std::vector<int64_t> sample_seeds;
+    for (const auto &seed_value : prompt_runner_conf["sample_seeds"]) {
+        int64_t seed = seed_value;
+        sample_seeds.push_back(seed);
+    }
+
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         std::string prompt = params.prompt;
 
@@ -222,8 +250,6 @@ int main(int argc, char ** argv) {
 
         for (const auto &seed_value : prompt_runner_conf["seeds"]) {
             int64_t seed = seed_value;
-
-            llama_set_rng_seed(ctx, seed);
 
             if (params.prompt.empty()) {
                 fprintf(stderr, "No prompt given!");
@@ -370,49 +396,80 @@ int main(int argc, char ** argv) {
                             candidates.emplace_back(llama_token_data{token_id, logits[token_id], 0.0f});
                         }
 
-                        llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+                        std::vector<llama_token_data> candidates_save = candidates;
 
-                        // Apply penalties
-                        float nl_logit = logits[llama_token_nl()];
-                        auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
-                        llama_sample_repetition_penalty(ctx, &candidates_p,
-                            last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                            last_n_repeat, repeat_penalty);
-                        llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
-                            last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                            last_n_repeat, alpha_frequency, alpha_presence);
-                        if (!penalize_nl) {
-                            logits[llama_token_nl()] = nl_logit;
+                        // The sample_seeds mechanism is a cheat, for the case where we just only
+                        // need the next token. We just reroll the selected candidate and
+                        // record the selections.
+                        // XXX: This really only works if you need one response token!
+                        int seeds_remaining = 1;
+                        int sample_seeds_idx = -1;
+                        llama_set_rng_seed(ctx, seed);
+                        if (sample_seeds.size() > 0) {
+                            sample_seeds_idx = 0;
+                            seeds_remaining = sample_seeds.size();
                         }
 
-                        if (grammar != NULL) {
-                            llama_sample_grammar(ctx, &candidates_p, grammar);
-                        }
-
-                        if (temp <= 0) {
-                            // Greedy sampling
-                            id = llama_sample_token_greedy(ctx, &candidates_p);
-                        } else {
-                            if (mirostat == 1) {
-                                static float mirostat_mu = 2.0f * mirostat_tau;
-                                const int mirostat_m = 100;
-                                llama_sample_temperature(ctx, &candidates_p, temp);
-                                id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
-                            } else if (mirostat == 2) {
-                                static float mirostat_mu = 2.0f * mirostat_tau;
-                                llama_sample_temperature(ctx, &candidates_p, temp);
-                                id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
-                            } else {
-                                // Temperature sampling
-                                llama_sample_top_k(ctx, &candidates_p, top_k, 1);
-                                llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
-                                llama_sample_typical(ctx, &candidates_p, typical_p, 1);
-                                llama_sample_top_p(ctx, &candidates_p, top_p, 1);
-                                llama_sample_temperature(ctx, &candidates_p, temp);
-                                id = llama_sample_token(ctx, &candidates_p);
+                        while (seeds_remaining > 0) {
+                            if (sample_seeds_idx >= 0) {
+                                seed = sample_seeds[sample_seeds_idx];
+                                llama_set_rng_seed(ctx, seed);
+                                sample_seeds_idx++;
                             }
+
+                            candidates = candidates_save;
+
+                            llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+
+                            // Apply penalties
+                            float nl_logit = logits[llama_token_nl()];
+                            auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                            llama_sample_repetition_penalty(ctx, &candidates_p,
+                                last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                last_n_repeat, repeat_penalty);
+                            llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
+                                last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                last_n_repeat, alpha_frequency, alpha_presence);
+                            if (!penalize_nl) {
+                                logits[llama_token_nl()] = nl_logit;
+                            }
+
+                            if (grammar != NULL) {
+                                llama_sample_grammar(ctx, &candidates_p, grammar);
+                            }
+
+                            if (temp <= 0) {
+                                // Greedy sampling
+                                id = llama_sample_token_greedy(ctx, &candidates_p);
+                            } else {
+                                if (mirostat == 1) {
+                                    static float mirostat_mu = 2.0f * mirostat_tau;
+                                    const int mirostat_m = 100;
+                                    llama_sample_temperature(ctx, &candidates_p, temp);
+                                    id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
+                                } else if (mirostat == 2) {
+                                    static float mirostat_mu = 2.0f * mirostat_tau;
+                                    llama_sample_temperature(ctx, &candidates_p, temp);
+                                    id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
+                                } else {
+                                    // Temperature sampling
+                                    llama_sample_top_k(ctx, &candidates_p, top_k, 1);
+                                    llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
+                                    llama_sample_typical(ctx, &candidates_p, typical_p, 1);
+                                    llama_sample_top_p(ctx, &candidates_p, top_p, 1);
+                                    llama_sample_temperature(ctx, &candidates_p, temp);
+                                    id = llama_sample_token(ctx, &candidates_p);
+                                }
+                            }
+
+                            if (sample_seeds.size() > 0 && id != llama_token_eos()) {
+                                std::vector<llama_token> embd_single_id;
+                                embd_single_id.push_back(id);
+                                j_resps.push_back(make_response(responses, test_id, seed, embd_single_id));
+                            }
+
+                            seeds_remaining -= 1;
                         }
-                        // printf("`%d`", candidates_p.size);
 
                         if (grammar != NULL) {
                             llama_grammar_accept_token(ctx, grammar, id);
@@ -424,7 +481,9 @@ int main(int argc, char ** argv) {
 
                     // add it to the context
                     embd.push_back(id);
-                    embd_gen.push_back(id);
+                    if (sample_seeds.size() == 0) {
+                        embd_gen.push_back(id);
+                    }
 
                     // decrement remaining sampling budget
                     --n_remain;
@@ -453,21 +512,25 @@ int main(int argc, char ** argv) {
                 }
             }
 
-            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
-            std::string gen = "";
-            for (auto id : embd_gen) {
-                gen += llama_token_to_str(ctx, id);
+            if (sample_seeds.size() == 0) {
+                j_resps.push_back(make_response(responses, test_id, seed, embd_gen));
             }
-            printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
-            fflush(stdout);
 
-            responses.push_back(gen_prefix + gen);
-
-            json single_response;
-            single_response["test_id"] = test_id;
-            single_response["seed"] = seed;
-            single_response["response"] = gen;
-            j_resps.push_back(single_response);
+//            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
+//            std::string gen = "";
+//            for (auto id : embd_gen) {
+//                gen += llama_token_to_str(ctx, id);
+//            }
+//            printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
+//            fflush(stdout);
+//
+//            responses.push_back(gen_prefix + gen);
+//
+//            json single_response;
+//            single_response["test_id"] = test_id;
+//            single_response["seed"] = seed;
+//            single_response["response"] = gen;
+//            j_resps.push_back(single_response);
 
 
             if (grammar != NULL) {
