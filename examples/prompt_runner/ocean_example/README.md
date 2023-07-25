@@ -21,7 +21,7 @@ Which contains the responses.
 
 There is a little script to make the results more pretty:
 
-    $ wlambda display\_weicon\_results.wl result\_1690315104.json
+    $ wlambda display_weicon_results.wl result_1690315104.json
     /mnt/models/PMC_LLAMA-7B.ggmlv3.q4_0_by_TheBloke_20230603.bin
     2.7 <= I get stressed out easily.
     2.7 <= I am the life of the party.
