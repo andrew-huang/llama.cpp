@@ -24,6 +24,7 @@ Here is an example how this config file should look like:
             1337, 31337,
             1, 2, 3, 4, 5, 6, 7
         ],
+        "sample_seeds": [...], # <- See below what this means, use with care!
         "replacements":[
             ["<TRUEFACT>", "I like to watch sci-fi."]
         ],
@@ -89,3 +90,28 @@ The output file `result_<timestamp>.json` will have the following format:
         ...
       ]
     }
+
+## Token Seeds Configuration
+
+In case you need just one token generated, which is the case for my benchmarks,
+you can specify the following config:
+
+    {
+        "seeds":[ 1 ],
+        "sample_seeds": [
+            324932, 39292, 190192, 12912,
+            1337, 31337,
+            1, 2, 3, 4, 5, 6, 7
+        ],
+        "replacements": ...,
+        "prompt_tests": ...,
+    }
+
+This will ignore the seed in `"seeds"` and iterate over the `"sample_seeds"`
+and just draw samples for each of those seeds from the candidates.
+
+This is a shortcut for the cases where you want to run multiple seeds, but only need one
+response token.
+
+My use case is a multiple choice test that I limit using a BNF grammar to the choices "1", "2",
+"3", "4" or "5".

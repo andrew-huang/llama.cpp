@@ -1,0 +1,15 @@
+{
+    "x0_notlike_crowds": 5.0,
+    "x1a_like_quietplaces": 5.0,
+    "x1b_notlike_noisyplace": 1.0,
+    "x2_like_minerals": 5.0,
+    "x3_dont_minerals": 1.0,
+    "x4_ppl_person": 1.0,
+    "x5_shy": 5.0,
+    "x6_star_trek": 5.0,
+    "x7_details": 5.0,
+    "x8_nolike_sex": 1.0,
+    "x9_like_sex": 4.0,
+    "x10_autism_asd": 5.0,
+    "x11_autism_spec": 5.0
+}
