@@ -128,6 +128,29 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     return single_response;
 }
 
+int process_prompt(const std::string &prompt, const gpt_params &params) {
+    llama_context *ctx = *g_ctx;
+
+    std::vector<llama_token> embd_inp =
+        ::llama_tokenize(ctx, prompt.c_str(), true);
+
+    int n_past = 0;
+
+    for (int i = 0; i < (int) embd_inp.size(); i += params.n_batch) {
+        int n_eval = (int) embd_inp.size() - i;
+        if (n_eval > params.n_batch) {
+            n_eval = params.n_batch;
+        }
+        printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
+        if (llama_eval(ctx, &embd_inp[i], n_eval, n_past, params.n_threads)) {
+            fprintf(stderr, "%s : failed to eval\n", __func__);
+            return 1;
+        }
+        n_past += n_eval;
+    }
+
+    return n_past;
+}
 
 int main(int argc, char ** argv) {
     gpt_params params;
@@ -406,8 +429,6 @@ int main(int argc, char ** argv) {
                 std::vector<llama_token> last_n_tokens(n_ctx);
                 std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
-                bool is_antiprompt        = false;
-
                 int n_past             = 0;
                 int n_remain           = params.n_predict;
                 int n_consumed         = 0;
@@ -418,7 +439,7 @@ int main(int argc, char ** argv) {
                 std::vector<llama_token> embd;
                 std::vector<llama_token> embd_gen;
 
-                while ((n_remain != 0 && !is_antiprompt)) {
+                while (n_remain != 0) {
                     // predict
                     if (embd.size() > 0) {
                         // Note: n_ctx - 4 here is to match the logic for commandline prompt handling via
@@ -441,6 +462,7 @@ int main(int argc, char ** argv) {
                             if (n_eval > params.n_batch) {
                                 n_eval = params.n_batch;
                             }
+                            printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
                             if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
                                 fprintf(stderr, "%s : failed to eval\n", __func__);
                                 return 1;
@@ -449,6 +471,12 @@ int main(int argc, char ** argv) {
                         }
                     }
 
+//                    std::string gen = "";
+//                    for (auto id : embd) {
+//                        gen += llama_token_to_str(ctx, id);
+//                    }
+//                    printf("[[%s]]\n", gen.c_str());
+//                    fflush(stdout);
                     embd.clear();
 
                     if ((int) embd_inp.size() <= n_consumed) {
@@ -584,9 +612,6 @@ int main(int argc, char ** argv) {
                             last_n_tokens.erase(last_n_tokens.begin());
                             last_n_tokens.push_back(embd_inp[n_consumed]);
                             ++n_consumed;
-                            if ((int) embd.size() >= params.n_batch) {
-                                break;
-                            }
                         }
                     }
 
