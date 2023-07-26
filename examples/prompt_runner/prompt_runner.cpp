@@ -42,13 +42,11 @@
 
 using json = nlohmann::json;
 
-static console_state con_st;
 static llama_context ** g_ctx;
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 void sigint_handler(int signo) {
     if (signo == SIGINT) {
-        console_cleanup(con_st);
         printf("\n");
         llama_print_timings(*g_ctx);
         _exit(130);
@@ -131,10 +129,37 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
 int process_prompt(const std::string &prompt, const gpt_params &params, std::vector<llama_token> &last_n_tokens) {
     llama_context *ctx = *g_ctx;
 
+    const int n_ctx = llama_n_ctx(ctx);
+
     std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
     std::vector<llama_token> embd_inp =
         ::llama_tokenize(ctx, prompt.c_str(), true);
+
+    // Note: n_ctx - 4 here is to match the logic for commandline prompt handling via
+    auto max_embd_size = n_ctx - 4;
+
+    // Ensure the input doesn't exceed the context size by truncating embd if necessary.
+    if ((int)embd_inp.size() > max_embd_size) {
+        auto skipped_tokens = embd_inp.size() - max_embd_size;
+        printf("<<input too long: skipped %zu token%s>>",
+            skipped_tokens, skipped_tokens != 1 ? "s" : "");
+        fflush(stdout);
+        embd_inp.resize(max_embd_size);
+    }
+
+    if (params.verbose_prompt) {
+        fprintf(stderr, "\n");
+        fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
+        fprintf(stderr, "%s: number of tokens in prompt = %zu\n",
+            __func__, embd_inp.size());
+        for (int i = 0; i < (int) embd_inp.size(); i++) {
+            fprintf(stderr, "%6d -> '%s'\n",
+                embd_inp[i], llama_token_to_str(ctx, embd_inp[i]));
+        }
+
+        fprintf(stderr, "\n");
+    }
 
     int n_past = 0;
 
@@ -143,7 +168,9 @@ int process_prompt(const std::string &prompt, const gpt_params &params, std::vec
         if (n_eval > params.n_batch) {
             n_eval = params.n_batch;
         }
+
         printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
+
         if (llama_eval(ctx, &embd_inp[i], n_eval, n_past, params.n_threads)) {
             fprintf(stderr, "%s : failed to eval\n", __func__);
             return -1;
@@ -175,13 +202,6 @@ int main(int argc, char ** argv) {
     }
 
     const json prompt_runner_conf = json::parse(file);
-
-    // save choice to use color for later
-    // (note for later: this is a slightly awkward choice)
-    con_st.use_color = params.use_color;
-    con_st.multiline_input = params.multiline_input;
-    console_init(con_st);
-    atexit([]() { console_cleanup(con_st); });
 
     if (params.perplexity) {
         printf("\n************\n");
@@ -288,10 +308,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\n");
     }
 
-
-    // tokenize the prompt
-    std::vector<llama_token> embd_inp;
-
     // Add a space in front of the first character to match OG llama tokenizer behavior
     params.prompt.insert(0, 1, ' ');
 
@@ -360,13 +376,32 @@ int main(int argc, char ** argv) {
 
         rtrim_nl(prompt);
 
+        // TODO: replace with ring-buffer
+        const int n_ctx = llama_n_ctx(ctx);
+        std::vector<llama_token> last_n_tokens_cached(n_ctx);
+        std::fill(last_n_tokens_cached.begin(), last_n_tokens_cached.end(), 0);
+
+        int n_past_cached = process_prompt(prompt, params, last_n_tokens_cached);
+
+        // TODO WEICON:
+        // - save state to memory here, destroy context
+
         printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
         for (auto &temp : temps) {
             params.temp = temp;
 
             for (const auto &seed_value : seeds) {
                 int64_t seed = seed_value;
+                // TODO WEICON:
+                // - make new context with old lparams (save them somehow?!)
+                // - restore context from memory, that was saved above.
+                // - 
                 llama_set_rng_seed(ctx, seed);
+
+                std::vector<llama_token> last_n_tokens = last_n_tokens_cached;
+                printf("LAST N TOKEN: %d\n", (int) last_n_tokens_cached[last_n_tokens_cached.size() - 1]);
+                int n_past = n_past_cached;
+                int n_remain = params.n_predict;
 
                 current_test_nr += 1;
 
@@ -375,46 +410,13 @@ int main(int argc, char ** argv) {
                     return 1;
                 }
 
-                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), true);
-
-                // Tokenize negative prompt
-                const int n_ctx = llama_n_ctx(ctx);
-
-                if ((int) embd_inp.size() > n_ctx - 4) {
-                    fprintf(stderr, "%s: error: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
-                    return 1;
-                }
-
-                // number of tokens to keep when resetting context
-                if (params.n_keep < 0 || params.n_keep > (int) embd_inp.size() || params.instruct) {
-                    params.n_keep = (int)embd_inp.size();
-                }
-
                 // determine newline token
                 auto llama_token_newline = ::llama_tokenize(ctx, "\n", false);
-
-                if (params.verbose_prompt) {
-                    fprintf(stderr, "\n");
-                    fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
-                    fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
-                    for (int i = 0; i < (int) embd_inp.size(); i++) {
-                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]));
-                    }
-
-                    if (params.n_keep > 0) {
-                    fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
-                        for (int i = 0; i < params.n_keep; i++) {
-                            fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]));
-                        }
-                        fprintf(stderr, "'\n");
-                    }
-                    fprintf(stderr, "\n");
-                }
 
                 if (first) {
                     fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
                             params.repeat_last_n, params.repeat_penalty, params.presence_penalty, params.frequency_penalty, params.top_k, params.tfs_z, params.top_p, params.typical_p, params.temp, params.mirostat, params.mirostat_eta, params.mirostat_tau);
-                    fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
+                    fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d\n", n_ctx, params.n_batch, params.n_predict);
                     fprintf(stderr, "\n\n");
                 }
 
@@ -433,16 +435,7 @@ int main(int argc, char ** argv) {
                         grammar_rules.data(), grammar_rules.size(), parsed_grammar.symbol_ids.at("root"));
                 }
 
-                // TODO: replace with ring-buffer
-                std::vector<llama_token> last_n_tokens(n_ctx);
-                std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
-                int n_past             = 0;
-                int n_remain           = params.n_predict;
-                int n_consumed         = 0;
-
-                // the first thing we will do is to output the prompt, so set color accordingly
-                console_set_color(con_st, CONSOLE_COLOR_PROMPT);
 
                 std::vector<llama_token> embd;
                 std::vector<llama_token> embd_gen;
@@ -450,31 +443,19 @@ int main(int argc, char ** argv) {
                 while (n_remain != 0) {
                     // predict
                     if (embd.size() > 0) {
-                        // Note: n_ctx - 4 here is to match the logic for commandline prompt handling via
-                        // --prompt or --file which uses the same value.
-                        auto max_embd_size = n_ctx - 4;
-                        // Ensure the input doesn't exceed the context size by truncating embd if necessary.
-                        if ((int)embd.size() > max_embd_size) {
-                            auto skipped_tokens = embd.size() - max_embd_size;
-                            console_set_color(con_st, CONSOLE_COLOR_ERROR);
-                            printf("<<input too long: skipped %zu token%s>>", skipped_tokens, skipped_tokens != 1 ? "s" : "");
-                            console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
-                            fflush(stdout);
-                            embd.resize(max_embd_size);
-                        }
-
                         // evaluate tokens in batches
-                        // embd is typically prepared beforehand to fit within a batch, but not always
                         for (int i = 0; i < (int) embd.size(); i += params.n_batch) {
                             int n_eval = (int) embd.size() - i;
                             if (n_eval > params.n_batch) {
                                 n_eval = params.n_batch;
                             }
+
                             printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
                             if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
                                 fprintf(stderr, "%s : failed to eval\n", __func__);
                                 return 1;
                             }
+
                             n_past += n_eval;
                         }
                     }
@@ -485,9 +466,10 @@ int main(int argc, char ** argv) {
 //                    }
 //                    printf("[[%s]]\n", gen.c_str());
 //                    fflush(stdout);
+
                     embd.clear();
 
-                    if ((int) embd_inp.size() <= n_consumed) {
+                    {
                         // out of user input, sample next token
                         const float   temp            = params.temp;
                         const int32_t top_k           = params.top_k <= 0 ? llama_n_vocab(ctx) : params.top_k;
@@ -615,19 +597,6 @@ int main(int argc, char ** argv) {
 
                         // decrement remaining sampling budget
                         --n_remain;
-                    } else {
-                        // some user input remains from prompt or interaction, forward it to processing
-                        while ((int) embd_inp.size() > n_consumed) {
-                            embd.push_back(embd_inp[n_consumed]);
-                            last_n_tokens.erase(last_n_tokens.begin());
-                            last_n_tokens.push_back(embd_inp[n_consumed]);
-                            ++n_consumed;
-                        }
-                    }
-
-                    // reset color to default if we there is no pending user input
-                    if ((int)embd_inp.size() == n_consumed) {
-                        console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
                     }
 
                     // end of text token
@@ -684,20 +653,26 @@ int main(int argc, char ** argv) {
                 }
 
                 first = false;
+
+                // TODO WEICON:
+                // - delete context here
             }
         }
     }
 
     llama_print_timings(ctx);
 
+    // get model file name
     std::string model_file = params.model.c_str();
     model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
     printf("model: %s\n", model_file.c_str());
 
+    // print the collected responses for debugging and to see first results
     for (auto resp : responses) {
         printf("%s\n", resp.c_str());
     }
 
+    // write out the results to a json file
     std::string responses_json_dump = j_resps.dump(2);
     printf("%s\n", responses_json_dump.c_str());
     json results;
@@ -706,11 +681,13 @@ int main(int argc, char ** argv) {
     results["config"] = prompt_runner_conf;
     results["results"] = j_resps;
 
-    std::string out_file_name = "result_" + std::to_string(time(NULL)) + "_" + model_file + ".json";
+    std::string out_file_name =
+        "result_" + std::to_string(time(NULL)) + "_" + model_file + ".json";
     std::ofstream outf(out_file_name);
     outf << results.dump(2);
     outf.close();
 
+    // cleanup...
     llama_free(ctx);
     llama_free_model(model);
 
