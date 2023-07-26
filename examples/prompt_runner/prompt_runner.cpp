@@ -18,9 +18,11 @@
 #include <ctime>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 #include <regex>
+#include <filesystem>
 
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
 #include <signal.h>
@@ -54,14 +56,64 @@ void sigint_handler(int signo) {
 }
 #endif
 
-json make_response(std::vector<std::string> &responses, const std::string &test_id, int64_t seed, const std::vector<llama_token> &embd_gen) {
+const char* ws = "\n\r";
+
+// trim from end of string (right)
+inline std::string& rtrim_nl(std::string& s, const char* t = ws)
+{
+    s.erase(s.find_last_not_of(t) + 1);
+    return s;
+}
+
+// trim from beginning of string (left)
+inline std::string& ltrim_nl(std::string& s, const char* t = ws)
+{
+    s.erase(0, s.find_first_not_of(t));
+    return s;
+}
+
+// trim from both ends of string (right then left)
+inline std::string& trim_nl(std::string& s, const char* t = ws)
+{
+    return ltrim_nl(rtrim_nl(s, t), t);
+}
+
+static std::string tokens_to_output_formatted_string(const llama_context *ctx, const llama_token token)
+{
+    std::string out = token == -1 ? "" : llama_token_to_str(ctx, token);
+    // if first bit is 1, meaning it's a partial character
+    if (out.size() > 0 && (out[0] & 0x80) == 0x80)
+    {
+        std::stringstream ss;
+        ss << std::hex << (out[0] & 0xff);
+        std::string res(ss.str());
+        out = "\\x" + res;
+    }
+    return out;
+}
+
+json make_response(std::vector<std::string> &responses, int cur_test_nr,
+    int total_tests, const std::string &test_id, float temp,
+    int64_t seed, const std::vector<llama_token> &embd_gen)
+{
     llama_context *ctx = *g_ctx;
 
-    std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
+    std::ostringstream oss;
+    oss << std::setprecision(1) << temp;
+    std::string temp_str = oss.str();
+
+    std::string gen_prefix =
+        "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
+        + "| id=" + test_id
+        + ", temp=" + temp_str
+        + ", seed=" + std::to_string(seed)
+        + "]:";
+
     std::string gen = "";
     for (auto id : embd_gen) {
-        gen += llama_token_to_str(ctx, id);
+        gen += tokens_to_output_formatted_string(ctx, id);
     }
+
     printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
     fflush(stdout);
 
@@ -70,6 +122,7 @@ json make_response(std::vector<std::string> &responses, const std::string &test_
     json single_response;
     single_response["test_id"] = test_id;
     single_response["seed"] = seed;
+    single_response["temp"] = temp_str;
     single_response["response"] = gen;
 
     return single_response;
@@ -224,10 +277,38 @@ int main(int argc, char ** argv) {
     bool first = true;
 
     std::vector<int64_t> sample_seeds;
-    for (const auto &seed_value : prompt_runner_conf["sample_seeds"]) {
-        int64_t seed = seed_value;
-        sample_seeds.push_back(seed);
+    if (prompt_runner_conf.find("sample_seeds") != prompt_runner_conf.end()) {
+        for (const auto &seed_value : prompt_runner_conf["sample_seeds"]) {
+            int64_t seed = seed_value;
+            sample_seeds.push_back(seed);
+        }
     }
+
+    std::vector<float> temps;
+
+    if (prompt_runner_conf.find("temps") != prompt_runner_conf.end()) {
+        for (const auto &temp : prompt_runner_conf["temps"]) {
+            temps.push_back(temp);
+        }
+    } else {
+        temps.push_back(params.temp);
+    }
+
+    std::vector<int64_t> seeds;
+    if (prompt_runner_conf.find("seeds") != prompt_runner_conf.end()) {
+        for (const auto &seed_value : prompt_runner_conf["seeds"]) {
+            int64_t seed = seed_value;
+            printf("seed value: %ld\n", seed);
+            seeds.push_back(seed);
+        }
+    } else {
+        seeds.push_back(params.seed);
+    }
+
+    int total_tests =
+        seeds.size() * temps.size() * prompt_runner_conf["prompt_tests"].size();
+    int current_test_nr = 0;
+
 
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         std::string prompt = params.prompt;
@@ -246,304 +327,336 @@ int main(int argc, char ** argv) {
             prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
         }
 
+        rtrim_nl(prompt);
+
         printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
+        for (auto &temp : temps) {
+            params.temp = temp;
 
-        for (const auto &seed_value : prompt_runner_conf["seeds"]) {
-            int64_t seed = seed_value;
+            for (const auto &seed_value : seeds) {
+                int64_t seed = seed_value;
+                llama_set_rng_seed(ctx, seed);
 
-            if (params.prompt.empty()) {
-                fprintf(stderr, "No prompt given!");
-                return 1;
-            }
+                current_test_nr += 1;
 
-            embd_inp = ::llama_tokenize(ctx, prompt.c_str(), true);
-
-            // Tokenize negative prompt
-            const int n_ctx = llama_n_ctx(ctx);
-
-            if ((int) embd_inp.size() > n_ctx - 4) {
-                fprintf(stderr, "%s: error: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
-                return 1;
-            }
-
-            // number of tokens to keep when resetting context
-            if (params.n_keep < 0 || params.n_keep > (int) embd_inp.size() || params.instruct) {
-                params.n_keep = (int)embd_inp.size();
-            }
-
-            // determine newline token
-            auto llama_token_newline = ::llama_tokenize(ctx, "\n", false);
-
-            if (params.verbose_prompt) {
-                fprintf(stderr, "\n");
-                fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
-                fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
-                for (int i = 0; i < (int) embd_inp.size(); i++) {
-                    fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]));
+                if (params.prompt.empty()) {
+                    fprintf(stderr, "No prompt given!");
+                    return 1;
                 }
 
-                if (params.n_keep > 0) {
-                fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
-                    for (int i = 0; i < params.n_keep; i++) {
-                        fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]));
-                    }
-                    fprintf(stderr, "'\n");
-                }
-                fprintf(stderr, "\n");
-            }
+                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), true);
 
-            if (first) {
-                fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
-                        params.repeat_last_n, params.repeat_penalty, params.presence_penalty, params.frequency_penalty, params.top_k, params.tfs_z, params.top_p, params.typical_p, params.temp, params.mirostat, params.mirostat_eta, params.mirostat_tau);
-                fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
-                fprintf(stderr, "\n\n");
-            }
+                // Tokenize negative prompt
+                const int n_ctx = llama_n_ctx(ctx);
 
-            llama_grammar *grammar = NULL;
-            if (!params.grammar.empty()) {
-                {
-                    auto it = params.logit_bias.find(llama_token_eos());
-                    if (it != params.logit_bias.end() && it->second == -INFINITY) {
-                        fprintf(stderr,
-                            "%s: warning: EOS token is disabled, which will cause most grammars to fail\n", __func__);
-                    }
+                if ((int) embd_inp.size() > n_ctx - 4) {
+                    fprintf(stderr, "%s: error: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
+                    return 1;
                 }
 
-                std::vector<const llama_grammar_element *> grammar_rules(parsed_grammar.c_rules());
-                grammar = llama_grammar_init(
-                    grammar_rules.data(), grammar_rules.size(), parsed_grammar.symbol_ids.at("root"));
-            }
+                // number of tokens to keep when resetting context
+                if (params.n_keep < 0 || params.n_keep > (int) embd_inp.size() || params.instruct) {
+                    params.n_keep = (int)embd_inp.size();
+                }
 
-            // TODO: replace with ring-buffer
-            std::vector<llama_token> last_n_tokens(n_ctx);
-            std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
+                // determine newline token
+                auto llama_token_newline = ::llama_tokenize(ctx, "\n", false);
 
-            bool is_antiprompt        = false;
-
-            int n_past             = 0;
-            int n_remain           = params.n_predict;
-            int n_consumed         = 0;
-
-            // the first thing we will do is to output the prompt, so set color accordingly
-            console_set_color(con_st, CONSOLE_COLOR_PROMPT);
-
-            std::vector<llama_token> embd;
-            std::vector<llama_token> embd_gen;
-
-            while ((n_remain != 0 && !is_antiprompt)) {
-                // predict
-                if (embd.size() > 0) {
-                    // Note: n_ctx - 4 here is to match the logic for commandline prompt handling via
-                    // --prompt or --file which uses the same value.
-                    auto max_embd_size = n_ctx - 4;
-                    // Ensure the input doesn't exceed the context size by truncating embd if necessary.
-                    if ((int)embd.size() > max_embd_size) {
-                        auto skipped_tokens = embd.size() - max_embd_size;
-                        console_set_color(con_st, CONSOLE_COLOR_ERROR);
-                        printf("<<input too long: skipped %zu token%s>>", skipped_tokens, skipped_tokens != 1 ? "s" : "");
-                        console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
-                        fflush(stdout);
-                        embd.resize(max_embd_size);
+                if (params.verbose_prompt) {
+                    fprintf(stderr, "\n");
+                    fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
+                    fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
+                    for (int i = 0; i < (int) embd_inp.size(); i++) {
+                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]));
                     }
 
-                    // evaluate tokens in batches
-                    // embd is typically prepared beforehand to fit within a batch, but not always
-                    for (int i = 0; i < (int) embd.size(); i += params.n_batch) {
-                        int n_eval = (int) embd.size() - i;
-                        if (n_eval > params.n_batch) {
-                            n_eval = params.n_batch;
+                    if (params.n_keep > 0) {
+                    fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
+                        for (int i = 0; i < params.n_keep; i++) {
+                            fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]));
                         }
-                        if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
-                            fprintf(stderr, "%s : failed to eval\n", __func__);
-                            return 1;
-                        }
-                        n_past += n_eval;
+                        fprintf(stderr, "'\n");
                     }
+                    fprintf(stderr, "\n");
                 }
 
-                embd.clear();
+                if (first) {
+                    fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
+                            params.repeat_last_n, params.repeat_penalty, params.presence_penalty, params.frequency_penalty, params.top_k, params.tfs_z, params.top_p, params.typical_p, params.temp, params.mirostat, params.mirostat_eta, params.mirostat_tau);
+                    fprintf(stderr, "generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
+                    fprintf(stderr, "\n\n");
+                }
 
-                if ((int) embd_inp.size() <= n_consumed) {
-                    // out of user input, sample next token
-                    const float   temp            = params.temp;
-                    const int32_t top_k           = params.top_k <= 0 ? llama_n_vocab(ctx) : params.top_k;
-                    const float   top_p           = params.top_p;
-                    const float   tfs_z           = params.tfs_z;
-                    const float   typical_p       = params.typical_p;
-                    const int32_t repeat_last_n   = params.repeat_last_n < 0 ? n_ctx : params.repeat_last_n;
-                    const float   repeat_penalty  = params.repeat_penalty;
-                    const float   alpha_presence  = params.presence_penalty;
-                    const float   alpha_frequency = params.frequency_penalty;
-                    const int     mirostat        = params.mirostat;
-                    const float   mirostat_tau    = params.mirostat_tau;
-                    const float   mirostat_eta    = params.mirostat_eta;
-                    const bool    penalize_nl     = params.penalize_nl;
-
-                    llama_token id = 0;
-
+                llama_grammar *grammar = NULL;
+                if (!params.grammar.empty()) {
                     {
-                        auto logits  = llama_get_logits(ctx);
-                        auto n_vocab = llama_n_vocab(ctx);
+                        auto it = params.logit_bias.find(llama_token_eos());
+                        if (it != params.logit_bias.end() && it->second == -INFINITY) {
+                            fprintf(stderr,
+                                "%s: warning: EOS token is disabled, which will cause most grammars to fail\n", __func__);
+                        }
+                    }
 
-                        // Apply params.logit_bias map
-                        for (auto it = params.logit_bias.begin(); it != params.logit_bias.end(); it++) {
-                            logits[it->first] += it->second;
+                    std::vector<const llama_grammar_element *> grammar_rules(parsed_grammar.c_rules());
+                    grammar = llama_grammar_init(
+                        grammar_rules.data(), grammar_rules.size(), parsed_grammar.symbol_ids.at("root"));
+                }
+
+                // TODO: replace with ring-buffer
+                std::vector<llama_token> last_n_tokens(n_ctx);
+                std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
+
+                bool is_antiprompt        = false;
+
+                int n_past             = 0;
+                int n_remain           = params.n_predict;
+                int n_consumed         = 0;
+
+                // the first thing we will do is to output the prompt, so set color accordingly
+                console_set_color(con_st, CONSOLE_COLOR_PROMPT);
+
+                std::vector<llama_token> embd;
+                std::vector<llama_token> embd_gen;
+
+                while ((n_remain != 0 && !is_antiprompt)) {
+                    // predict
+                    if (embd.size() > 0) {
+                        // Note: n_ctx - 4 here is to match the logic for commandline prompt handling via
+                        // --prompt or --file which uses the same value.
+                        auto max_embd_size = n_ctx - 4;
+                        // Ensure the input doesn't exceed the context size by truncating embd if necessary.
+                        if ((int)embd.size() > max_embd_size) {
+                            auto skipped_tokens = embd.size() - max_embd_size;
+                            console_set_color(con_st, CONSOLE_COLOR_ERROR);
+                            printf("<<input too long: skipped %zu token%s>>", skipped_tokens, skipped_tokens != 1 ? "s" : "");
+                            console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
+                            fflush(stdout);
+                            embd.resize(max_embd_size);
                         }
 
-                        std::vector<llama_token_data> candidates;
-                        candidates.reserve(n_vocab);
-                        for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
-                            candidates.emplace_back(llama_token_data{token_id, logits[token_id], 0.0f});
+                        // evaluate tokens in batches
+                        // embd is typically prepared beforehand to fit within a batch, but not always
+                        for (int i = 0; i < (int) embd.size(); i += params.n_batch) {
+                            int n_eval = (int) embd.size() - i;
+                            if (n_eval > params.n_batch) {
+                                n_eval = params.n_batch;
+                            }
+                            if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
+                                fprintf(stderr, "%s : failed to eval\n", __func__);
+                                return 1;
+                            }
+                            n_past += n_eval;
                         }
+                    }
 
-                        std::vector<llama_token_data> candidates_save = candidates;
+                    embd.clear();
 
-                        // The sample_seeds mechanism is a cheat, for the case where we just only
-                        // need the next token. We just reroll the selected candidate and
-                        // record the selections.
-                        // XXX: This really only works if you need one response token!
-                        int seeds_remaining = 1;
-                        int sample_seeds_idx = -1;
-                        llama_set_rng_seed(ctx, seed);
-                        if (sample_seeds.size() > 0) {
-                            sample_seeds_idx = 0;
-                            seeds_remaining = sample_seeds.size();
-                        }
+                    if ((int) embd_inp.size() <= n_consumed) {
+                        // out of user input, sample next token
+                        const float   temp            = params.temp;
+                        const int32_t top_k           = params.top_k <= 0 ? llama_n_vocab(ctx) : params.top_k;
+                        const float   top_p           = params.top_p;
+                        const float   tfs_z           = params.tfs_z;
+                        const float   typical_p       = params.typical_p;
+                        const int32_t repeat_last_n   = params.repeat_last_n < 0 ? n_ctx : params.repeat_last_n;
+                        const float   repeat_penalty  = params.repeat_penalty;
+                        const float   alpha_presence  = params.presence_penalty;
+                        const float   alpha_frequency = params.frequency_penalty;
+                        const int     mirostat        = params.mirostat;
+                        const float   mirostat_tau    = params.mirostat_tau;
+                        const float   mirostat_eta    = params.mirostat_eta;
+                        const bool    penalize_nl     = params.penalize_nl;
 
-                        while (seeds_remaining > 0) {
-                            if (sample_seeds_idx >= 0) {
-                                seed = sample_seeds[sample_seeds_idx];
-                                llama_set_rng_seed(ctx, seed);
-                                sample_seeds_idx++;
+                        llama_token id = 0;
+
+                        {
+                            auto logits  = llama_get_logits(ctx);
+                            auto n_vocab = llama_n_vocab(ctx);
+
+                            // Apply params.logit_bias map
+                            for (auto it = params.logit_bias.begin(); it != params.logit_bias.end(); it++) {
+                                logits[it->first] += it->second;
                             }
 
-                            candidates = candidates_save;
+                            std::vector<llama_token_data> candidates;
+                            candidates.reserve(n_vocab);
+                            for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+                                candidates.emplace_back(llama_token_data{token_id, logits[token_id], 0.0f});
+                            }
 
-                            llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+                            std::vector<llama_token_data> candidates_save = candidates;
 
-                            // Apply penalties
-                            float nl_logit = logits[llama_token_nl()];
-                            auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
-                            llama_sample_repetition_penalty(ctx, &candidates_p,
-                                last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                last_n_repeat, repeat_penalty);
-                            llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
-                                last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                last_n_repeat, alpha_frequency, alpha_presence);
-                            if (!penalize_nl) {
-                                logits[llama_token_nl()] = nl_logit;
+                            // The sample_seeds mechanism is a cheat, for the case where we just only
+                            // need the next token. We just reroll the selected candidate and
+                            // record the selections.
+                            // XXX: This really only works if you need one response token!
+                            int seeds_remaining = 1;
+                            int sample_seeds_idx = -1;
+                            if (sample_seeds.size() > 0) {
+                                sample_seeds_idx = 0;
+                                seeds_remaining = sample_seeds.size();
+                            }
+
+                            while (seeds_remaining > 0) {
+                                if (sample_seeds_idx >= 0) {
+                                    seed = sample_seeds[sample_seeds_idx];
+                                    fprintf(stderr, "set seed=%ld\n", seed);
+                                    llama_set_rng_seed(ctx, seed);
+                                    sample_seeds_idx++;
+                                }
+
+                                candidates = candidates_save;
+
+                                llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+
+                                // Apply penalties
+                                float nl_logit = logits[llama_token_nl()];
+                                auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                                llama_sample_repetition_penalty(ctx, &candidates_p,
+                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                    last_n_repeat, repeat_penalty);
+                                llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
+                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                    last_n_repeat, alpha_frequency, alpha_presence);
+                                if (!penalize_nl) {
+                                    logits[llama_token_nl()] = nl_logit;
+                                }
+
+                                if (grammar != NULL) {
+                                    llama_sample_grammar(ctx, &candidates_p, grammar);
+                                }
+
+                                if (temp <= 0) {
+                                    // Greedy sampling
+                                    id = llama_sample_token_greedy(ctx, &candidates_p);
+                                } else {
+                                    if (mirostat == 1) {
+                                        static float mirostat_mu = 2.0f * mirostat_tau;
+                                        const int mirostat_m = 100;
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
+                                    } else if (mirostat == 2) {
+                                        static float mirostat_mu = 2.0f * mirostat_tau;
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
+                                    } else {
+                                        // Temperature sampling
+                                        llama_sample_top_k(ctx, &candidates_p, top_k, 1);
+                                        llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
+                                        llama_sample_typical(ctx, &candidates_p, typical_p, 1);
+                                        llama_sample_top_p(ctx, &candidates_p, top_p, 1);
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token(ctx, &candidates_p);
+                                    }
+                                }
+
+                                if (sample_seeds.size() > 0 && id != llama_token_eos()) {
+                                    std::vector<llama_token> embd_single_id;
+                                    embd_single_id.push_back(id);
+                                    j_resps.push_back(make_response(
+                                        responses, current_test_nr, total_tests,
+                                        test_id, 0.0, seed, embd_single_id));
+                                }
+
+                                seeds_remaining -= 1;
                             }
 
                             if (grammar != NULL) {
-                                llama_sample_grammar(ctx, &candidates_p, grammar);
+                                llama_grammar_accept_token(ctx, grammar, id);
                             }
 
-                            if (temp <= 0) {
-                                // Greedy sampling
-                                id = llama_sample_token_greedy(ctx, &candidates_p);
-                            } else {
-                                if (mirostat == 1) {
-                                    static float mirostat_mu = 2.0f * mirostat_tau;
-                                    const int mirostat_m = 100;
-                                    llama_sample_temperature(ctx, &candidates_p, temp);
-                                    id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
-                                } else if (mirostat == 2) {
-                                    static float mirostat_mu = 2.0f * mirostat_tau;
-                                    llama_sample_temperature(ctx, &candidates_p, temp);
-                                    id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
-                                } else {
-                                    // Temperature sampling
-                                    llama_sample_top_k(ctx, &candidates_p, top_k, 1);
-                                    llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
-                                    llama_sample_typical(ctx, &candidates_p, typical_p, 1);
-                                    llama_sample_top_p(ctx, &candidates_p, top_p, 1);
-                                    llama_sample_temperature(ctx, &candidates_p, temp);
-                                    id = llama_sample_token(ctx, &candidates_p);
-                                }
-                            }
-
-                            if (sample_seeds.size() > 0 && id != llama_token_eos()) {
-                                std::vector<llama_token> embd_single_id;
-                                embd_single_id.push_back(id);
-                                j_resps.push_back(make_response(responses, test_id, seed, embd_single_id));
-                            }
-
-                            seeds_remaining -= 1;
+                            last_n_tokens.erase(last_n_tokens.begin());
+                            last_n_tokens.push_back(id);
                         }
 
-                        if (grammar != NULL) {
-                            llama_grammar_accept_token(ctx, grammar, id);
+                        // add it to the context
+                        embd.push_back(id);
+                        if (sample_seeds.size() == 0) {
+                            embd_gen.push_back(id);
                         }
 
-                        last_n_tokens.erase(last_n_tokens.begin());
-                        last_n_tokens.push_back(id);
+                        // decrement remaining sampling budget
+                        --n_remain;
+                    } else {
+                        // some user input remains from prompt or interaction, forward it to processing
+                        while ((int) embd_inp.size() > n_consumed) {
+                            embd.push_back(embd_inp[n_consumed]);
+                            last_n_tokens.erase(last_n_tokens.begin());
+                            last_n_tokens.push_back(embd_inp[n_consumed]);
+                            ++n_consumed;
+                            if ((int) embd.size() >= params.n_batch) {
+                                break;
+                            }
+                        }
                     }
 
-                    // add it to the context
-                    embd.push_back(id);
-                    if (sample_seeds.size() == 0) {
-                        embd_gen.push_back(id);
+                    // reset color to default if we there is no pending user input
+                    if ((int)embd_inp.size() == n_consumed) {
+                        console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
                     }
 
-                    // decrement remaining sampling budget
-                    --n_remain;
-                } else {
-                    // some user input remains from prompt or interaction, forward it to processing
-                    while ((int) embd_inp.size() > n_consumed) {
-                        embd.push_back(embd_inp[n_consumed]);
-                        last_n_tokens.erase(last_n_tokens.begin());
-                        last_n_tokens.push_back(embd_inp[n_consumed]);
-                        ++n_consumed;
-                        if ((int) embd.size() >= params.n_batch) {
-                            break;
+                    // end of text token
+                    if (!embd.empty() && embd.back() == llama_token_eos()) {
+                        // fprintf(stderr, " [end of text]\n");
+                        break;
+                    }
+
+                    if (prompt_runner_conf.find("stop_sequences")
+                        != prompt_runner_conf.end())
+                    {
+                        std::string generated = "";
+                        for (auto id : embd_gen) {
+                            generated += llama_token_to_str(ctx, id);
+                        }
+
+                        for (const auto &matched : prompt_runner_conf["stop_sequences"])
+                        {
+                            if (generated.find(matched) != std::string::npos)
+                            {
+                                n_remain = 0;
+                                break;
+                            }
                         }
                     }
                 }
 
-                // reset color to default if we there is no pending user input
-                if ((int)embd_inp.size() == n_consumed) {
-                    console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
+                if (sample_seeds.size() == 0) {
+                    j_resps.push_back(
+                        make_response(
+                            responses, current_test_nr, total_tests, test_id,
+                            params.temp, seed, embd_gen));
                 }
 
-                // end of text token
-                if (!embd.empty() && embd.back() == llama_token_eos()) {
-                    // fprintf(stderr, " [end of text]\n");
-                    break;
+    //            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
+    //            std::string gen = "";
+    //            for (auto id : embd_gen) {
+    //                gen += llama_token_to_str(ctx, id);
+    //            }
+    //            printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
+    //            fflush(stdout);
+    //
+    //            responses.push_back(gen_prefix + gen);
+    //
+    //            json single_response;
+    //            single_response["test_id"] = test_id;
+    //            single_response["seed"] = seed;
+    //            single_response["response"] = gen;
+    //            j_resps.push_back(single_response);
+
+
+                if (grammar != NULL) {
+                    llama_grammar_free(grammar);
                 }
+
+                first = false;
             }
-
-            if (sample_seeds.size() == 0) {
-                j_resps.push_back(make_response(responses, test_id, seed, embd_gen));
-            }
-
-//            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
-//            std::string gen = "";
-//            for (auto id : embd_gen) {
-//                gen += llama_token_to_str(ctx, id);
-//            }
-//            printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
-//            fflush(stdout);
-//
-//            responses.push_back(gen_prefix + gen);
-//
-//            json single_response;
-//            single_response["test_id"] = test_id;
-//            single_response["seed"] = seed;
-//            single_response["response"] = gen;
-//            j_resps.push_back(single_response);
-
-
-            if (grammar != NULL) {
-                llama_grammar_free(grammar);
-            }
-
-            first = false;
         }
     }
 
     llama_print_timings(ctx);
 
     std::string model_file = params.model.c_str();
+    model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
     printf("model: %s\n", model_file.c_str());
 
     for (auto resp : responses) {
@@ -558,7 +671,7 @@ int main(int argc, char ** argv) {
     results["config"] = prompt_runner_conf;
     results["results"] = j_resps;
 
-    std::string out_file_name = "result_" + std::to_string(time(NULL)) + ".json";
+    std::string out_file_name = "result_" + std::to_string(time(NULL)) + "_" + model_file + ".json";
     std::ofstream outf(out_file_name);
     outf << results.dump(2);
     outf.close();
