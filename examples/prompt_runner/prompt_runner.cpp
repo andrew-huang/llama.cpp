@@ -128,8 +128,10 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     return single_response;
 }
 
-int process_prompt(const std::string &prompt, const gpt_params &params) {
+int process_prompt(const std::string &prompt, const gpt_params &params, std::vector<llama_token> &last_n_tokens) {
     llama_context *ctx = *g_ctx;
+
+    std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
     std::vector<llama_token> embd_inp =
         ::llama_tokenize(ctx, prompt.c_str(), true);
@@ -144,8 +146,14 @@ int process_prompt(const std::string &prompt, const gpt_params &params) {
         printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
         if (llama_eval(ctx, &embd_inp[i], n_eval, n_past, params.n_threads)) {
             fprintf(stderr, "%s : failed to eval\n", __func__);
-            return 1;
+            return -1;
         }
+
+        for (int j = i; j < (i + n_eval); j++) {
+            last_n_tokens.erase(last_n_tokens.begin());
+            last_n_tokens.push_back(embd_inp[j]);
+        }
+
         n_past += n_eval;
     }
 
@@ -536,6 +544,8 @@ int main(int argc, char ** argv) {
                                 candidates = candidates_save;
 
                                 llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+
+                                printf("last_n_tokens_size=%d\n", (int) last_n_tokens.size());
 
                                 // Apply penalties
                                 float nl_logit = logits[llama_token_nl()];
