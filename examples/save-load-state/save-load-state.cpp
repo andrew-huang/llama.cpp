@@ -25,6 +25,8 @@ int main(int argc, char ** argv) {
 
     auto lparams = llama_context_default_params();
 
+    // Added n_gpu_layers and passed -ngl on CLI
+    lparams.n_gpu_layers = params.n_gpu_layers;
     lparams.n_ctx     = params.n_ctx;
     lparams.seed      = params.seed;
     lparams.f16_kv    = params.memory_f16;
