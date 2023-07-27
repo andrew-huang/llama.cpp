@@ -250,11 +250,12 @@ int main(int argc, char ** argv) {
 
     llama_backend_init(params.numa);
 
-    llama_model * model;
-    llama_context * ctx;
+    llama_model *model = nullptr;
+    llama_context *ctx = nullptr;
     g_ctx = &ctx;
 
     // load the model and apply lora adapter, if any
+    auto lparams = llama_context_params_from_gpt_params(params);
     std::tie(model, ctx) = llama_init_from_gpt_params(params);
 
     if (model == NULL) {
@@ -267,32 +268,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\n");
         fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
                 params.n_threads, std::thread::hardware_concurrency(), llama_print_system_info());
-    }
-
-    // determine the maximum memory usage needed to do inference for the given n_batch and n_ctx parameters
-    // uncomment the "used_mem" line in llama.cpp to see the results
-    if (params.mem_test) {
-        {
-            fprintf(stderr, "%s: testing memory usage for n_batch = %d, n_ctx = %d\n", __func__, params.n_batch, params.n_ctx);
-
-            const std::vector<llama_token> tmp(params.n_batch, llama_token_bos());
-            llama_eval(ctx, tmp.data(), tmp.size(), params.n_ctx, params.n_threads);
-        }
-
-        llama_print_timings(ctx);
-        llama_free(ctx);
-        llama_free_model(model);
-
-        return 0;
-    }
-
-    // export the cgraph and exit
-    if (params.export_cgraph) {
-        llama_eval_export(ctx, "llama.ggml");
-        llama_free(ctx);
-        llama_free_model(model);
-
-        return 0;
     }
 
     grammar_parser::parse_state parsed_grammar;
@@ -386,6 +361,13 @@ int main(int argc, char ** argv) {
         // TODO WEICON:
         // - save state to memory here, destroy context
 
+        const size_t n_state_size_max = llama_get_state_size(ctx);
+        uint8_t *state_mem = new uint8_t[n_state_size_max];
+        /* const size_t n_state_size_cur = */ llama_copy_state_data(ctx, state_mem);
+
+        llama_free(ctx);
+        ctx = nullptr;
+
         printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
         for (auto &temp : temps) {
             params.temp = temp;
@@ -396,6 +378,8 @@ int main(int argc, char ** argv) {
                 // - make new context with old lparams (save them somehow?!)
                 // - restore context from memory, that was saved above.
                 // - 
+                ctx = llama_new_context_with_model(model, lparams);
+                llama_set_state_data(ctx, state_mem);
                 llama_set_rng_seed(ctx, seed);
 
                 std::vector<llama_token> last_n_tokens = last_n_tokens_cached;
@@ -404,14 +388,6 @@ int main(int argc, char ** argv) {
                 int n_remain = params.n_predict;
 
                 current_test_nr += 1;
-
-                if (params.prompt.empty()) {
-                    fprintf(stderr, "No prompt given!");
-                    return 1;
-                }
-
-                // determine newline token
-                auto llama_token_newline = ::llama_tokenize(ctx, "\n", false);
 
                 if (first) {
                     fprintf(stderr, "sampling: repeat_last_n = %d, repeat_penalty = %f, presence_penalty = %f, frequency_penalty = %f, top_k = %d, tfs_z = %f, top_p = %f, typical_p = %f, temp = %f, mirostat = %d, mirostat_lr = %f, mirostat_ent = %f\n",
@@ -435,12 +411,11 @@ int main(int argc, char ** argv) {
                         grammar_rules.data(), grammar_rules.size(), parsed_grammar.symbol_ids.at("root"));
                 }
 
-
-
                 std::vector<llama_token> embd;
                 std::vector<llama_token> embd_gen;
 
                 while (n_remain != 0) {
+                    printf("n_remain=%d embd.size=%d\n", n_remain, (int) embd.size());
                     // predict
                     if (embd.size() > 0) {
                         // evaluate tokens in batches
@@ -450,7 +425,7 @@ int main(int argc, char ** argv) {
                                 n_eval = params.n_batch;
                             }
 
-                            printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
+                            printf("### PROC[%d]: i=%d, n_eval=%d, n_past=%d\n", embd[i], i, n_eval, n_past);
                             if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
                                 fprintf(stderr, "%s : failed to eval\n", __func__);
                                 return 1;
@@ -532,6 +507,7 @@ int main(int argc, char ** argv) {
                                 // Apply penalties
                                 float nl_logit = logits[llama_token_nl()];
                                 auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                                printf("last_n_repeat=%d\n", (int) last_n_repeat);
                                 llama_sample_repetition_penalty(ctx, &candidates_p,
                                     last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
                                     last_n_repeat, repeat_penalty);
@@ -591,6 +567,9 @@ int main(int argc, char ** argv) {
 
                         // add it to the context
                         embd.push_back(id);
+                        std::string tok = llama_token_to_str(ctx, id);
+                        printf("tok=[%s %d]\n", tok.c_str(), id);
+
                         if (sample_seeds.size() == 0) {
                             embd_gen.push_back(id);
                         }
@@ -656,11 +635,11 @@ int main(int argc, char ** argv) {
 
                 // TODO WEICON:
                 // - delete context here
+                llama_free(ctx);
+                ctx = nullptr;
             }
         }
     }
-
-    llama_print_timings(ctx);
 
     // get model file name
     std::string model_file = params.model.c_str();
@@ -688,7 +667,6 @@ int main(int argc, char ** argv) {
     outf.close();
 
     // cleanup...
-    llama_free(ctx);
     llama_free_model(model);
 
     llama_backend_free();

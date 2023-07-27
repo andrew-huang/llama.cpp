@@ -3246,6 +3246,7 @@ struct llama_context * llama_init_from_file(
 
 void llama_free(struct llama_context * ctx) {
     if (ctx->model_owner) {
+        printf("free ctx->model!!!!!\n");
         delete &ctx->model;
     }
     delete ctx;
