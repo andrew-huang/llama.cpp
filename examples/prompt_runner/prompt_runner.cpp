@@ -352,15 +352,23 @@ int main(int argc, char ** argv) {
             prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
         }
 
+        std::string repl_info = "";
+
         for (const auto &repl : prompt_test["replacements"]) {
             std::string search = repl[0];
             std::string replacement = repl[1];
+            repl_info += search + " := " +  replacement + "\n";
             prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
         }
 
         rtrim_nl(prompt);
 
-        printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
+        if (params.verbose_prompt) {
+            printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
+        }
+
+        printf("------------------------\n%s\n", repl_info.c_str());
+
         for (auto &temp : temps) {
             params.temp = temp;
 
@@ -536,7 +544,6 @@ int main(int argc, char ** argv) {
                             while (seeds_remaining > 0) {
                                 if (sample_seeds_idx >= 0) {
                                     seed = sample_seeds[sample_seeds_idx];
-                                    fprintf(stderr, "set seed=%ld\n", seed);
                                     llama_set_rng_seed(ctx, seed);
                                     sample_seeds_idx++;
                                 }
@@ -544,8 +551,6 @@ int main(int argc, char ** argv) {
                                 candidates = candidates_save;
 
                                 llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
-
-                                printf("last_n_tokens_size=%d\n", (int) last_n_tokens.size());
 
                                 // Apply penalties
                                 float nl_logit = logits[llama_token_nl()];
@@ -593,7 +598,7 @@ int main(int argc, char ** argv) {
                                     embd_single_id.push_back(id);
                                     j_resps.push_back(make_response(
                                         responses, current_test_nr, total_tests,
-                                        test_id, 0.0, seed, embd_single_id));
+                                        test_id, temp, seed, embd_single_id));
                                 }
 
                                 seeds_remaining -= 1;
