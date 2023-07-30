@@ -45,6 +45,8 @@ using json = nlohmann::json;
 static console_state con_st;
 static llama_context ** g_ctx;
 
+static size_t   benchmark_start_time;
+
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 void sigint_handler(int signo) {
     if (signo == SIGINT) {
@@ -102,6 +104,14 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     oss << std::setprecision(1) << temp;
     std::string temp_str = oss.str();
 
+    if (cur_test_nr <= 0)
+        cur_test_nr = 1;
+
+    int passed_time = time(NULL) - benchmark_start_time;
+    float time_per_test = ((float) passed_time) / (float) cur_test_nr;
+    float remaining = time_per_test * (float) (total_tests - cur_test_nr);
+    remaining /= 60.0;
+
     std::string gen_prefix =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
         + "| id=" + test_id
@@ -114,7 +124,7 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
         gen += tokens_to_output_formatted_string(ctx, id);
     }
 
-    printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
+    printf("[s/t=%5.2fs [eta=%5.1fm]] %s %s\n", time_per_test, remaining, gen_prefix.c_str(), gen.c_str());
     fflush(stdout);
 
     responses.push_back(gen_prefix + gen);
@@ -340,6 +350,7 @@ int main(int argc, char ** argv) {
         seeds.size() * temps.size() * prompt_runner_conf["prompt_tests"].size();
     int current_test_nr = 0;
 
+    benchmark_start_time = time(NULL);
 
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         std::string prompt = params.prompt;
@@ -478,7 +489,7 @@ int main(int argc, char ** argv) {
                             if (n_eval > params.n_batch) {
                                 n_eval = params.n_batch;
                             }
-                            printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
+                            // printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
                             if (llama_eval(ctx, &embd[i], n_eval, n_past, params.n_threads)) {
                                 fprintf(stderr, "%s : failed to eval\n", __func__);
                                 return 1;
