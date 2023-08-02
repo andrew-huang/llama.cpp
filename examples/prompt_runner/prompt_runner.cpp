@@ -186,6 +186,14 @@ int main(int argc, char ** argv) {
 
     const json prompt_runner_conf = json::parse(file);
 
+    if (prompt_runner_conf.find("prompt_tests") == prompt_runner_conf.end()) {
+        fprintf(stderr, "**********\n");
+        fprintf(stderr, "ERROR: No prompt_tests in prompt_runner_config.json!\n");
+        fprintf(stderr, "**********\n");
+
+        return 1;
+    }
+
     // save choice to use color for later
     // (note for later: this is a slightly awkward choice)
     con_st.use_color = params.use_color;
@@ -319,6 +327,7 @@ int main(int argc, char ** argv) {
 
     std::vector<int64_t> sample_seeds;
     if (prompt_runner_conf.find("sample_seeds") != prompt_runner_conf.end()) {
+        fprintf(stderr, "Reading sample_seeds\n");
         for (const auto &seed_value : prompt_runner_conf["sample_seeds"]) {
             int64_t seed = seed_value;
             sample_seeds.push_back(seed);
@@ -328,6 +337,7 @@ int main(int argc, char ** argv) {
     std::vector<float> temps;
 
     if (prompt_runner_conf.find("temps") != prompt_runner_conf.end()) {
+        fprintf(stderr, "Reading temps\n");
         for (const auto &temp : prompt_runner_conf["temps"]) {
             temps.push_back(temp);
         }
@@ -337,6 +347,7 @@ int main(int argc, char ** argv) {
 
     std::vector<int64_t> seeds;
     if (prompt_runner_conf.find("seeds") != prompt_runner_conf.end()) {
+        fprintf(stderr, "Reading seeds\n");
         for (const auto &seed_value : prompt_runner_conf["seeds"]) {
             int64_t seed = seed_value;
             printf("seed value: %ld\n", seed);
@@ -357,19 +368,25 @@ int main(int argc, char ** argv) {
 
         std::string test_id = prompt_test["id"];
 
-        for (const auto &repl : prompt_runner_conf["replacements"]) {
-            std::string search = repl[0];
-            std::string replacement = repl[1];
-            prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
+        if (prompt_runner_conf.find("replacements") != prompt_runner_conf.end()) {
+            for (const auto &repl : prompt_runner_conf["replacements"]) {
+                std::string search = repl[0];
+                std::string replacement = repl[1];
+                prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
+            }
         }
 
         std::string repl_info = "";
 
-        for (const auto &repl : prompt_test["replacements"]) {
-            std::string search = repl[0];
-            std::string replacement = repl[1];
-            repl_info += search + " := " +  replacement + "\n";
-            prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
+        if (prompt_test.find("replacements") != prompt_test.end()) {
+            for (const auto &repl : prompt_test["replacements"]) {
+                std::string search = repl[0];
+                std::string replacement = repl[1];
+                if (replacement.size() < 250) {
+                    repl_info += search + " := " +  replacement + "\n";
+                }
+                prompt = std::regex_replace(prompt, std::regex(repl[0]), replacement);
+            }
         }
 
         rtrim_nl(prompt);
@@ -378,7 +395,7 @@ int main(int argc, char ** argv) {
             printf("PROMPT------------------------\n%s\n-----------------------------\n", prompt.c_str());
         }
 
-        printf("------------------------\n%s\n", repl_info.c_str());
+        printf("------------------------\n%s", repl_info.c_str());
 
         for (auto &temp : temps) {
             params.temp = temp;
@@ -716,7 +733,20 @@ int main(int argc, char ** argv) {
 
     std::string responses_json_dump = j_resps.dump(2);
     printf("%s\n", responses_json_dump.c_str());
+    json j_params;
+    j_params["rms_norm_eps"] = params.rms_norm_eps;
+    j_params["rope_freq_base"] = params.rope_freq_base;
+    j_params["rope_freq_scale"] = params.rope_freq_scale;
+    j_params["temp"] = params.temp;
+    j_params["top_k"] = params.top_k;
+    j_params["top_p"] = params.top_p;
+    j_params["tfs_z"] = params.tfs_z;
+    j_params["typical_p"] = params.typical_p;
+    j_params["repeat_last_n"] = params.repeat_last_n;
+    j_params["repeat_penality"] = params.repeat_penalty;
+
     json results;
+    results["params"] = j_params;
     results["model_file"] = model_file;
     results["prompt"] = std::string(params.prompt);
     results["config"] = prompt_runner_conf;
