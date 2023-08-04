@@ -24,6 +24,7 @@ Here is an example how this config file should look like:
             1337, 31337,
             1, 2, 3, 4, 5, 6, 7
         ],
+        "record_next_token_info": false,
         "sample_seeds": [...], # <- See below what this means, use with care!
         "replacements":[
             ["<TRUEFACT>", "I like to watch sci-fi."]
@@ -115,3 +116,40 @@ response token.
 
 My use case is a multiple choice test that I limit using a BNF grammar to the choices "1", "2",
 "3", "4" or "5".
+
+## Recording Tokens and their Probability
+
+By setting the "record\_next\_token\_info" to `true` you can record the probabilities of the tokens
+after the evaluation of the model. This is most useful in combination with the BNF grammar,
+as it can tell you with which probabilities the token "1", "2", "3", "4" or "5" did have.
+
+The response will look like this:
+
+    {
+      "config": <contents of prompt_runner_config.json>,
+      "model_file": "/mnt/old/home/new_data/llama-2-7b.ggmlv3.q5_1_by_TheBloke_20230718.bin",
+      "prompt": <the input prompt contents>,
+      "results": [ ... ],
+      "tokens": [
+        {
+          "test_id": "wears_blouse5",
+          "tokens": [
+            [ "3", 0.5827564597129822 ],
+            [ "4", 0.20104598999023438 ],
+            [ "2", 0.13559207320213318 ],
+            [ "1", 0.07167476415634155 ],
+            [ "5", 0.008930721320211887 ]
+          ]
+        },
+        {
+          "test_id": "was_teacher5",
+          "tokens": [
+            [ "3", 0.500302255153656 ],
+            [ "1", 0.2798364460468292 ],
+            [ "4", 0.11437837034463882 ],
+            [ "5", 0.07212226837873459 ],
+            [ "2", 0.03336074948310852 ]
+          ]
+        },
+      ]
+    }

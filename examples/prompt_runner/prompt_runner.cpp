@@ -348,6 +348,7 @@ int main(int argc, char ** argv) {
 
     std::vector<std::string> responses;
     json j_resps;
+    json j_tok_resps;
 
     bool first = true;
 
@@ -585,10 +586,11 @@ int main(int argc, char ** argv) {
                             }
 
                             std::vector<llama_token_data> candidates_save = candidates;
+                            std::vector<llama_token_data> candidates_token = candidates;
 
                             if (record_next_token_info) {
                                 llama_token_data_array candidates_p =
-                                    { candidates.data(), candidates.size(), false };
+                                    { candidates_token.data(), candidates_token.size(), false };
 
                                 if (grammar != NULL) {
                                     llama_sample_grammar(ctx, &candidates_p, grammar);
@@ -610,98 +612,98 @@ int main(int argc, char ** argv) {
                                     }
                                 }
 
-                                j_resps.push_back(
-                                    make_token_respose(
-                                        responses, current_test_nr, total_tests, test_id, tokens));
+                                if (tokens.size() > 1) {
+                                    j_tok_resps.push_back(
+                                        make_token_respose(
+                                            responses, current_test_nr, total_tests, test_id, tokens));
+                                }
+                            }
 
-                                n_remain = 1;
-                            } else {
-                                // The sample_seeds mechanism is a cheat, for the case where we just only
-                                // need the next token. We just reroll the selected candidate and
-                                // record the selections.
-                                // XXX: This really only works if you need one response token!
-                                int seeds_remaining = 1;
-                                int sample_seeds_idx = -1;
-                                if (sample_seeds.size() > 0) {
-                                    sample_seeds_idx = 0;
-                                    seeds_remaining = sample_seeds.size();
+                            // The sample_seeds mechanism is a cheat, for the case where we just only
+                            // need the next token. We just reroll the selected candidate and
+                            // record the selections.
+                            // XXX: This really only works if you need one response token!
+                            int seeds_remaining = 1;
+                            int sample_seeds_idx = -1;
+                            if (sample_seeds.size() > 0) {
+                                sample_seeds_idx = 0;
+                                seeds_remaining = sample_seeds.size();
+                            }
+
+                            while (seeds_remaining > 0) {
+                                if (sample_seeds_idx >= 0) {
+                                    seed = sample_seeds[sample_seeds_idx];
+                                    llama_set_rng_seed(ctx, seed);
+                                    sample_seeds_idx++;
                                 }
 
-                                while (seeds_remaining > 0) {
-                                    if (sample_seeds_idx >= 0) {
-                                        seed = sample_seeds[sample_seeds_idx];
-                                        llama_set_rng_seed(ctx, seed);
-                                        sample_seeds_idx++;
-                                    }
+                                candidates = candidates_save;
 
-                                    candidates = candidates_save;
+                                llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
 
-                                    llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
-
-                                    // Apply penalties
-                                    float nl_logit = logits[llama_token_nl()];
-                                    auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
-                                    llama_sample_repetition_penalty(ctx, &candidates_p,
-                                        last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                        last_n_repeat, repeat_penalty);
-                                    llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
-                                        last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                        last_n_repeat, alpha_frequency, alpha_presence);
-                                    if (!penalize_nl) {
-                                        logits[llama_token_nl()] = nl_logit;
-                                    }
-
-                                    if (grammar != NULL) {
-                                        llama_sample_grammar(ctx, &candidates_p, grammar);
-                                    }
-
-                                    if (temp <= 0) {
-                                        // Greedy sampling
-                                        id = llama_sample_token_greedy(ctx, &candidates_p);
-                                    } else {
-                                        if (mirostat == 1) {
-                                            static float mirostat_mu = 2.0f * mirostat_tau;
-                                            const int mirostat_m = 100;
-                                            llama_sample_temperature(ctx, &candidates_p, temp);
-                                            id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
-                                        } else if (mirostat == 2) {
-                                            static float mirostat_mu = 2.0f * mirostat_tau;
-                                            llama_sample_temperature(ctx, &candidates_p, temp);
-                                            id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
-                                        } else {
-                                            // Temperature sampling
-                                            llama_sample_top_k(ctx, &candidates_p, top_k, 1);
-                                            llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
-                                            llama_sample_typical(ctx, &candidates_p, typical_p, 1);
-                                            llama_sample_top_p(ctx, &candidates_p, top_p, 1);
-                                            llama_sample_temperature(ctx, &candidates_p, temp);
-                                            id = llama_sample_token(ctx, &candidates_p);
-                                        }
-                                    }
-
-                                    if (sample_seeds.size() > 0 && id != llama_token_eos()) {
-                                        std::vector<llama_token> embd_single_id;
-                                        embd_single_id.push_back(id);
-                                        j_resps.push_back(make_response(
-                                            responses, current_test_nr, total_tests,
-                                            test_id, temp, seed, embd_single_id));
-                                    }
-
-                                    seeds_remaining -= 1;
+                                // Apply penalties
+                                float nl_logit = logits[llama_token_nl()];
+                                auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                                llama_sample_repetition_penalty(ctx, &candidates_p,
+                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                    last_n_repeat, repeat_penalty);
+                                llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
+                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                    last_n_repeat, alpha_frequency, alpha_presence);
+                                if (!penalize_nl) {
+                                    logits[llama_token_nl()] = nl_logit;
                                 }
 
                                 if (grammar != NULL) {
-                                    llama_grammar_accept_token(ctx, grammar, id);
+                                    llama_sample_grammar(ctx, &candidates_p, grammar);
                                 }
 
-                                last_n_tokens.erase(last_n_tokens.begin());
-                                last_n_tokens.push_back(id);
+                                if (temp <= 0) {
+                                    // Greedy sampling
+                                    id = llama_sample_token_greedy(ctx, &candidates_p);
+                                } else {
+                                    if (mirostat == 1) {
+                                        static float mirostat_mu = 2.0f * mirostat_tau;
+                                        const int mirostat_m = 100;
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
+                                    } else if (mirostat == 2) {
+                                        static float mirostat_mu = 2.0f * mirostat_tau;
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
+                                    } else {
+                                        // Temperature sampling
+                                        llama_sample_top_k(ctx, &candidates_p, top_k, 1);
+                                        llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
+                                        llama_sample_typical(ctx, &candidates_p, typical_p, 1);
+                                        llama_sample_top_p(ctx, &candidates_p, top_p, 1);
+                                        llama_sample_temperature(ctx, &candidates_p, temp);
+                                        id = llama_sample_token(ctx, &candidates_p);
+                                    }
+                                }
+
+                                if (sample_seeds.size() > 0 && id != llama_token_eos()) {
+                                    std::vector<llama_token> embd_single_id;
+                                    embd_single_id.push_back(id);
+                                    j_resps.push_back(make_response(
+                                        responses, current_test_nr, total_tests,
+                                        test_id, temp, seed, embd_single_id));
+                                }
+
+                                seeds_remaining -= 1;
                             }
+
+                            if (grammar != NULL) {
+                                llama_grammar_accept_token(ctx, grammar, id);
+                            }
+
+                            last_n_tokens.erase(last_n_tokens.begin());
+                            last_n_tokens.push_back(id);
                         }
 
                         // add it to the context
                         embd.push_back(id);
-                        if (!record_next_token_info && sample_seeds.size() == 0) {
+                        if (sample_seeds.size() == 0) {
                             embd_gen.push_back(id);
                         }
 
@@ -747,7 +749,7 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                if (!record_next_token_info && sample_seeds.size() == 0) {
+                if (sample_seeds.size() == 0) {
                     j_resps.push_back(
                         make_response(
                             responses, current_test_nr, total_tests, test_id,
@@ -810,6 +812,9 @@ int main(int argc, char ** argv) {
     results["prompt"] = std::string(params.prompt);
     results["config"] = prompt_runner_conf;
     results["results"] = j_resps;
+    if (record_next_token_info) {
+        results["tokens"] = j_tok_resps;
+    }
 
     std::string out_file_name = "result_" + std::to_string(time(NULL)) + "_" + model_file + ".json";
     std::ofstream outf(out_file_name);
