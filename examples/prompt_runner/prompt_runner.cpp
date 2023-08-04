@@ -94,6 +94,32 @@ static std::string tokens_to_output_formatted_string(const llama_context *ctx, c
     return out;
 }
 
+json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
+    int total_tests, const std::string &test_id, json tokens)
+{
+    if (cur_test_nr <= 0)
+        cur_test_nr = 1;
+
+    int passed_time = time(NULL) - benchmark_start_time;
+    float time_per_test = ((float) passed_time) / (float) cur_test_nr;
+    float remaining = time_per_test * (float) (total_tests - cur_test_nr);
+    remaining /= 60.0;
+
+    std::string info_str =
+        "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
+        + "| id=" + test_id + "]: " + tokens.dump(-1);
+    printf("[s/t=%5.2fs [eta=%5.1fm]] %s\n", time_per_test, remaining, info_str.c_str());
+    fflush(stdout);
+
+    responses.push_back(test_id + "=" + info_str);
+
+    json single_response;
+    single_response["test_id"] = test_id;
+    single_response["tokens"] = tokens;
+
+    return single_response;
+}
+
 json make_response(std::vector<std::string> &responses, int cur_test_nr,
     int total_tests, const std::string &test_id, float temp,
     int64_t seed, const std::vector<llama_token> &embd_gen)
@@ -324,6 +350,8 @@ int main(int argc, char ** argv) {
     json j_resps;
 
     bool first = true;
+
+    bool record_next_token_info = prompt_runner_conf["record_next_token_info"];
 
     std::vector<int64_t> sample_seeds;
     if (prompt_runner_conf.find("sample_seeds") != prompt_runner_conf.end()) {
@@ -558,91 +586,122 @@ int main(int argc, char ** argv) {
 
                             std::vector<llama_token_data> candidates_save = candidates;
 
-                            // The sample_seeds mechanism is a cheat, for the case where we just only
-                            // need the next token. We just reroll the selected candidate and
-                            // record the selections.
-                            // XXX: This really only works if you need one response token!
-                            int seeds_remaining = 1;
-                            int sample_seeds_idx = -1;
-                            if (sample_seeds.size() > 0) {
-                                sample_seeds_idx = 0;
-                                seeds_remaining = sample_seeds.size();
-                            }
-
-                            while (seeds_remaining > 0) {
-                                if (sample_seeds_idx >= 0) {
-                                    seed = sample_seeds[sample_seeds_idx];
-                                    llama_set_rng_seed(ctx, seed);
-                                    sample_seeds_idx++;
-                                }
-
-                                candidates = candidates_save;
-
-                                llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
-
-                                // Apply penalties
-                                float nl_logit = logits[llama_token_nl()];
-                                auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
-                                llama_sample_repetition_penalty(ctx, &candidates_p,
-                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                    last_n_repeat, repeat_penalty);
-                                llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
-                                    last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
-                                    last_n_repeat, alpha_frequency, alpha_presence);
-                                if (!penalize_nl) {
-                                    logits[llama_token_nl()] = nl_logit;
-                                }
+                            if (record_next_token_info) {
+                                llama_token_data_array candidates_p =
+                                    { candidates.data(), candidates.size(), false };
 
                                 if (grammar != NULL) {
                                     llama_sample_grammar(ctx, &candidates_p, grammar);
                                 }
 
-                                if (temp <= 0) {
-                                    // Greedy sampling
-                                    id = llama_sample_token_greedy(ctx, &candidates_p);
-                                } else {
-                                    if (mirostat == 1) {
-                                        static float mirostat_mu = 2.0f * mirostat_tau;
-                                        const int mirostat_m = 100;
-                                        llama_sample_temperature(ctx, &candidates_p, temp);
-                                        id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
-                                    } else if (mirostat == 2) {
-                                        static float mirostat_mu = 2.0f * mirostat_tau;
-                                        llama_sample_temperature(ctx, &candidates_p, temp);
-                                        id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
-                                    } else {
-                                        // Temperature sampling
-                                        llama_sample_top_k(ctx, &candidates_p, top_k, 1);
-                                        llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
-                                        llama_sample_typical(ctx, &candidates_p, typical_p, 1);
-                                        llama_sample_top_p(ctx, &candidates_p, top_p, 1);
-                                        llama_sample_temperature(ctx, &candidates_p, temp);
-                                        id = llama_sample_token(ctx, &candidates_p);
+                                llama_sample_softmax(nullptr, &candidates_p);
+
+                                json tokens;
+
+                                for (size_t i = 0; i < candidates_p.size; ++i) {
+                                    if (candidates_p.data[i].p > 0.00001) {
+                                        std::string tok =
+                                            tokens_to_output_formatted_string(
+                                                ctx, candidates_p.data[i].id);
+                                        json j_tok;
+                                        j_tok[0] = tok;
+                                        j_tok[1] = candidates_p.data[i].p;
+                                        tokens.push_back(j_tok);
                                     }
                                 }
 
-                                if (sample_seeds.size() > 0 && id != llama_token_eos()) {
-                                    std::vector<llama_token> embd_single_id;
-                                    embd_single_id.push_back(id);
-                                    j_resps.push_back(make_response(
-                                        responses, current_test_nr, total_tests,
-                                        test_id, temp, seed, embd_single_id));
+                                j_resps.push_back(
+                                    make_token_respose(
+                                        responses, current_test_nr, total_tests, test_id, tokens));
+
+                                n_remain = 1;
+                            } else {
+                                // The sample_seeds mechanism is a cheat, for the case where we just only
+                                // need the next token. We just reroll the selected candidate and
+                                // record the selections.
+                                // XXX: This really only works if you need one response token!
+                                int seeds_remaining = 1;
+                                int sample_seeds_idx = -1;
+                                if (sample_seeds.size() > 0) {
+                                    sample_seeds_idx = 0;
+                                    seeds_remaining = sample_seeds.size();
                                 }
 
-                                seeds_remaining -= 1;
-                            }
+                                while (seeds_remaining > 0) {
+                                    if (sample_seeds_idx >= 0) {
+                                        seed = sample_seeds[sample_seeds_idx];
+                                        llama_set_rng_seed(ctx, seed);
+                                        sample_seeds_idx++;
+                                    }
 
-                            if (grammar != NULL) {
-                                llama_grammar_accept_token(ctx, grammar, id);
-                            }
+                                    candidates = candidates_save;
 
-                            last_n_tokens.erase(last_n_tokens.begin());
-                            last_n_tokens.push_back(id);
+                                    llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
+
+                                    // Apply penalties
+                                    float nl_logit = logits[llama_token_nl()];
+                                    auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
+                                    llama_sample_repetition_penalty(ctx, &candidates_p,
+                                        last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                        last_n_repeat, repeat_penalty);
+                                    llama_sample_frequency_and_presence_penalties(ctx, &candidates_p,
+                                        last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
+                                        last_n_repeat, alpha_frequency, alpha_presence);
+                                    if (!penalize_nl) {
+                                        logits[llama_token_nl()] = nl_logit;
+                                    }
+
+                                    if (grammar != NULL) {
+                                        llama_sample_grammar(ctx, &candidates_p, grammar);
+                                    }
+
+                                    if (temp <= 0) {
+                                        // Greedy sampling
+                                        id = llama_sample_token_greedy(ctx, &candidates_p);
+                                    } else {
+                                        if (mirostat == 1) {
+                                            static float mirostat_mu = 2.0f * mirostat_tau;
+                                            const int mirostat_m = 100;
+                                            llama_sample_temperature(ctx, &candidates_p, temp);
+                                            id = llama_sample_token_mirostat(ctx, &candidates_p, mirostat_tau, mirostat_eta, mirostat_m, &mirostat_mu);
+                                        } else if (mirostat == 2) {
+                                            static float mirostat_mu = 2.0f * mirostat_tau;
+                                            llama_sample_temperature(ctx, &candidates_p, temp);
+                                            id = llama_sample_token_mirostat_v2(ctx, &candidates_p, mirostat_tau, mirostat_eta, &mirostat_mu);
+                                        } else {
+                                            // Temperature sampling
+                                            llama_sample_top_k(ctx, &candidates_p, top_k, 1);
+                                            llama_sample_tail_free(ctx, &candidates_p, tfs_z, 1);
+                                            llama_sample_typical(ctx, &candidates_p, typical_p, 1);
+                                            llama_sample_top_p(ctx, &candidates_p, top_p, 1);
+                                            llama_sample_temperature(ctx, &candidates_p, temp);
+                                            id = llama_sample_token(ctx, &candidates_p);
+                                        }
+                                    }
+
+                                    if (sample_seeds.size() > 0 && id != llama_token_eos()) {
+                                        std::vector<llama_token> embd_single_id;
+                                        embd_single_id.push_back(id);
+                                        j_resps.push_back(make_response(
+                                            responses, current_test_nr, total_tests,
+                                            test_id, temp, seed, embd_single_id));
+                                    }
+
+                                    seeds_remaining -= 1;
+                                }
+
+                                if (grammar != NULL) {
+                                    llama_grammar_accept_token(ctx, grammar, id);
+                                }
+
+                                last_n_tokens.erase(last_n_tokens.begin());
+                                last_n_tokens.push_back(id);
+                            }
                         }
 
                         // add it to the context
                         embd.push_back(id);
-                        if (sample_seeds.size() == 0) {
+                        if (!record_next_token_info && sample_seeds.size() == 0) {
                             embd_gen.push_back(id);
                         }
 
@@ -688,7 +747,7 @@ int main(int argc, char ** argv) {
                     }
                 }
 
-                if (sample_seeds.size() == 0) {
+                if (!record_next_token_info && sample_seeds.size() == 0) {
                     j_resps.push_back(
                         make_response(
                             responses, current_test_nr, total_tests, test_id,
