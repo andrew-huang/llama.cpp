@@ -95,7 +95,7 @@ static std::string tokens_to_output_formatted_string(const llama_context *ctx, c
 }
 
 json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
-    int total_tests, const std::string &test_id, json tokens)
+    int total_tests, const std::string &test_id, json tokens, json expected)
 {
     if (cur_test_nr <= 0)
         cur_test_nr = 1;
@@ -116,13 +116,14 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
     json single_response;
     single_response["test_id"] = test_id;
     single_response["tokens"] = tokens;
+    single_response["expected"] = expected;
 
     return single_response;
 }
 
 json make_response(std::vector<std::string> &responses, int cur_test_nr,
     int total_tests, const std::string &test_id, float temp,
-    int64_t seed, const std::vector<llama_token> &embd_gen)
+    int64_t seed, const std::vector<llama_token> &embd_gen, json expected)
 {
     llama_context *ctx = *g_ctx;
 
@@ -160,6 +161,7 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     single_response["seed"] = seed;
     single_response["temp"] = temp_str;
     single_response["response"] = gen;
+    single_response["expected"] = expected;
 
     return single_response;
 }
@@ -352,7 +354,7 @@ int main(int argc, char ** argv) {
 
     bool first = true;
 
-    bool record_next_token_info = prompt_runner_conf["record_next_token_info"];
+    bool record_next_token_info = prompt_runner_conf.value("record_next_token_info", false);
 
     std::vector<int64_t> sample_seeds;
     if (prompt_runner_conf.find("sample_seeds") != prompt_runner_conf.end()) {
@@ -386,8 +388,15 @@ int main(int argc, char ** argv) {
         seeds.push_back(params.seed);
     }
 
-    int total_tests =
-        seeds.size() * temps.size() * prompt_runner_conf["prompt_tests"].size();
+    int test_count = 0;
+    if (prompt_runner_conf.find("prompt_tests") != prompt_runner_conf.end()) {
+        test_count = prompt_runner_conf["prompt_tests"].size();
+    } else {
+        fprintf(stderr, "No \"prompt_tests\" defined in the prompt_runner_config.json!\n");
+        return 1;
+    }
+
+    int total_tests = seeds.size() * temps.size() * test_count;
     int current_test_nr = 0;
 
     benchmark_start_time = time(NULL);
@@ -395,7 +404,12 @@ int main(int argc, char ** argv) {
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         std::string prompt = params.prompt;
 
-        std::string test_id = prompt_test["id"];
+        json expected;
+        if (prompt_test.find("expected") != prompt_test.end()) {
+            expected = prompt_test["expected"];
+        }
+
+        std::string test_id = prompt_test.value("id", "unknown_test_id");
 
         if (prompt_runner_conf.find("replacements") != prompt_runner_conf.end()) {
             for (const auto &repl : prompt_runner_conf["replacements"]) {
@@ -615,7 +629,8 @@ int main(int argc, char ** argv) {
                                 if (tokens.size() > 1) {
                                     j_tok_resps.push_back(
                                         make_token_respose(
-                                            responses, current_test_nr, total_tests, test_id, tokens));
+                                            responses, current_test_nr,
+                                            total_tests, test_id, tokens, expected));
                                 }
                             }
 
@@ -687,7 +702,7 @@ int main(int argc, char ** argv) {
                                     embd_single_id.push_back(id);
                                     j_resps.push_back(make_response(
                                         responses, current_test_nr, total_tests,
-                                        test_id, temp, seed, embd_single_id));
+                                        test_id, temp, seed, embd_single_id, expected));
                                 }
 
                                 seeds_remaining -= 1;
@@ -753,7 +768,7 @@ int main(int argc, char ** argv) {
                     j_resps.push_back(
                         make_response(
                             responses, current_test_nr, total_tests, test_id,
-                            params.temp, seed, embd_gen));
+                            params.temp, seed, embd_gen, expected));
                 }
 
     //            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
