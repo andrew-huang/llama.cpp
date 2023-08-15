@@ -16,8 +16,9 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
-#include <fstream>
 #include <iostream>
+#include <iomanip>
+#include <fstream>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -94,6 +95,16 @@ static std::string tokens_to_output_formatted_string(const llama_context *ctx, c
     return out;
 }
 
+static std::string now_timestr() {
+    auto t = std::time(nullptr);
+    auto tm = *std::localtime(&t);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%d-%m-%Y %H-%M-%S");
+    auto str = oss.str();
+    return str;
+}
+
 json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
     int total_tests, const std::string &test_id, json tokens, json expected)
 {
@@ -105,10 +116,14 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
     float remaining = time_per_test * (float) (total_tests - cur_test_nr);
     remaining /= 60.0;
 
+    float passed_time_mins = ((float) passed_time) / 60.0;
+
     std::string info_str =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
         + "| id=" + test_id + "]: " + tokens.dump(-1);
-    printf("[s/t=%5.2fs [eta=%5.1fm]] %s\n", time_per_test, remaining, info_str.c_str());
+    printf(
+        "[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s\n",
+        time_per_test, remaining, passed_time_mins, info_str.c_str());
     fflush(stdout);
 
     responses.push_back(test_id + "=" + info_str);
@@ -117,6 +132,8 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
     single_response["test_id"] = test_id;
     single_response["tokens"] = tokens;
     single_response["expected"] = expected;
+    single_response["timestamp"] = (int) time(NULL);
+    single_response["time"] = now_timestr();
 
     return single_response;
 }
@@ -139,6 +156,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     float remaining = time_per_test * (float) (total_tests - cur_test_nr);
     remaining /= 60.0;
 
+    float passed_time_mins = ((float) passed_time) / 60.0;
+
     std::string gen_prefix =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
         + "| id=" + test_id
@@ -151,7 +170,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
         gen += tokens_to_output_formatted_string(ctx, id);
     }
 
-    printf("[s/t=%5.2fs [eta=%5.1fm]] %s %s\n", time_per_test, remaining, gen_prefix.c_str(), gen.c_str());
+    printf("[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s %s\n",
+        time_per_test, remaining, passed_time_mins, gen_prefix.c_str(), gen.c_str());
     fflush(stdout);
 
     responses.push_back(gen_prefix + gen);
@@ -162,6 +182,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     single_response["temp"] = temp_str;
     single_response["response"] = gen;
     single_response["expected"] = expected;
+    single_response["timestamp"] = (int) time(NULL);
+    single_response["time"] = now_timestr();
 
     return single_response;
 }
