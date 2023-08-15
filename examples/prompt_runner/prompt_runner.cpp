@@ -100,7 +100,7 @@ static std::string now_timestr() {
     auto tm = *std::localtime(&t);
 
     std::ostringstream oss;
-    oss << std::put_time(&tm, "%d-%m-%Y %H-%M-%S");
+    oss << std::put_time(&tm, "%d-%m-%Y %H:%M:%S");
     auto str = oss.str();
     return str;
 }
