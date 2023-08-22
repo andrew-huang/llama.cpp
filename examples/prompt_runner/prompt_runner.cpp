@@ -204,6 +204,7 @@ int process_prompt(const std::string &prompt, const gpt_params &params, std::vec
             n_eval = params.n_batch;
         }
         printf("### PROC: i=%d, n_eval=%d, n_past=%d\n", i, n_eval, n_past);
+        fflush(stdout);
         if (llama_eval(ctx, &embd_inp[i], n_eval, n_past, params.n_threads)) {
             fprintf(stderr, "%s : failed to eval\n", __func__);
             return -1;
@@ -461,6 +462,7 @@ int main(int argc, char ** argv) {
         }
 
         printf("------------------------\n%s", repl_info.c_str());
+        fflush(stdout);
 
         for (auto &temp : temps) {
             params.temp = temp;
@@ -831,6 +833,8 @@ int main(int argc, char ** argv) {
 
     std::string responses_json_dump = j_resps.dump(2);
     printf("%s\n", responses_json_dump.c_str());
+    fflush(stdout);
+
     json j_params;
     j_params["rms_norm_eps"] = params.rms_norm_eps;
     j_params["rope_freq_base"] = params.rope_freq_base;
@@ -857,6 +861,9 @@ int main(int argc, char ** argv) {
     std::ofstream outf(out_file_name);
     outf << results.dump(2);
     outf.close();
+
+    printf("[PROMPT_RUNNER_OUTPUT_FILE: %s]\n", out_file_name.c_str());
+    fflush(stdout);
 
     llama_free(ctx);
     llama_free_model(model);
