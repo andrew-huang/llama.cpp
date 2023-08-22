@@ -43,7 +43,6 @@
 
 using json = nlohmann::json;
 
-static console_state con_st;
 static llama_context ** g_ctx;
 
 static size_t   benchmark_start_time;
@@ -51,7 +50,6 @@ static size_t   benchmark_start_time;
 #if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__)) || defined (_WIN32)
 void sigint_handler(int signo) {
     if (signo == SIGINT) {
-        console_cleanup(con_st);
         printf("\n");
         llama_print_timings(*g_ctx);
         _exit(130);
@@ -245,13 +243,6 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // save choice to use color for later
-    // (note for later: this is a slightly awkward choice)
-    con_st.use_color = params.use_color;
-    con_st.multiline_input = params.multiline_input;
-    console_init(con_st);
-    atexit([]() { console_cleanup(con_st); });
-
     if (params.perplexity) {
         printf("\n************\n");
         printf("%s: please use the 'perplexity' tool for perplexity calculations\n", __func__);
@@ -324,7 +315,7 @@ int main(int argc, char ** argv) {
         {
             fprintf(stderr, "%s: testing memory usage for n_batch = %d, n_ctx = %d\n", __func__, params.n_batch, params.n_ctx);
 
-            const std::vector<llama_token> tmp(params.n_batch, llama_token_bos());
+            const std::vector<llama_token> tmp(params.n_batch, llama_token_bos(ctx));
             llama_eval(ctx, tmp.data(), tmp.size(), params.n_ctx, params.n_threads);
         }
 
@@ -366,7 +357,7 @@ int main(int argc, char ** argv) {
 
     // do one empty run to warm up the model
     {
-        const std::vector<llama_token> tmp = { llama_token_bos(), };
+        const std::vector<llama_token> tmp = { llama_token_bos(ctx), };
         llama_eval(ctx, tmp.data(), tmp.size(), 0, params.n_threads);
         llama_reset_timings(ctx);
     }
@@ -501,13 +492,13 @@ int main(int argc, char ** argv) {
                     fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
                     fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
                     for (int i = 0; i < (int) embd_inp.size(); i++) {
-                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]));
+                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]).c_str());
                     }
 
                     if (params.n_keep > 0) {
                     fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
                         for (int i = 0; i < params.n_keep; i++) {
-                            fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]));
+                            fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]).c_str());
                         }
                         fprintf(stderr, "'\n");
                     }
@@ -524,7 +515,7 @@ int main(int argc, char ** argv) {
                 llama_grammar *grammar = NULL;
                 if (!params.grammar.empty()) {
                     {
-                        auto it = params.logit_bias.find(llama_token_eos());
+                        auto it = params.logit_bias.find(llama_token_eos(ctx));
                         if (it != params.logit_bias.end() && it->second == -INFINITY) {
                             fprintf(stderr,
                                 "%s: warning: EOS token is disabled, which will cause most grammars to fail\n", __func__);
@@ -544,9 +535,6 @@ int main(int argc, char ** argv) {
                 int n_remain           = params.n_predict;
                 int n_consumed         = 0;
 
-                // the first thing we will do is to output the prompt, so set color accordingly
-                console_set_color(con_st, CONSOLE_COLOR_PROMPT);
-
                 std::vector<llama_token> embd;
                 std::vector<llama_token> embd_gen;
 
@@ -559,9 +547,7 @@ int main(int argc, char ** argv) {
                         // Ensure the input doesn't exceed the context size by truncating embd if necessary.
                         if ((int)embd.size() > max_embd_size) {
                             auto skipped_tokens = embd.size() - max_embd_size;
-                            console_set_color(con_st, CONSOLE_COLOR_ERROR);
                             printf("<<input too long: skipped %zu token%s>>", skipped_tokens, skipped_tokens != 1 ? "s" : "");
-                            console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
                             fflush(stdout);
                             embd.resize(max_embd_size);
                         }
@@ -681,7 +667,7 @@ int main(int argc, char ** argv) {
                                 llama_token_data_array candidates_p = { candidates.data(), candidates.size(), false };
 
                                 // Apply penalties
-                                float nl_logit = logits[llama_token_nl()];
+                                float nl_logit = logits[llama_token_nl(ctx)];
                                 auto last_n_repeat = std::min(std::min((int)last_n_tokens.size(), repeat_last_n), n_ctx);
                                 llama_sample_repetition_penalty(ctx, &candidates_p,
                                     last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
@@ -690,7 +676,7 @@ int main(int argc, char ** argv) {
                                     last_n_tokens.data() + last_n_tokens.size() - last_n_repeat,
                                     last_n_repeat, alpha_frequency, alpha_presence);
                                 if (!penalize_nl) {
-                                    logits[llama_token_nl()] = nl_logit;
+                                    logits[llama_token_nl(ctx)] = nl_logit;
                                 }
 
                                 if (grammar != NULL) {
@@ -721,7 +707,7 @@ int main(int argc, char ** argv) {
                                     }
                                 }
 
-                                if (sample_seeds.size() > 0 && id != llama_token_eos()) {
+                                if (sample_seeds.size() > 0 && id != llama_token_eos(ctx)) {
                                     std::vector<llama_token> embd_single_id;
                                     embd_single_id.push_back(id);
                                     j_resps.push_back(make_response(
@@ -758,13 +744,8 @@ int main(int argc, char ** argv) {
                         }
                     }
 
-                    // reset color to default if we there is no pending user input
-                    if ((int)embd_inp.size() == n_consumed) {
-                        console_set_color(con_st, CONSOLE_COLOR_DEFAULT);
-                    }
-
                     // end of text token
-                    if (!embd.empty() && embd.back() == llama_token_eos()) {
+                    if (!embd.empty() && embd.back() == llama_token_eos(ctx)) {
                         // fprintf(stderr, " [end of text]\n");
                         break;
                     }
@@ -836,7 +817,6 @@ int main(int argc, char ** argv) {
     fflush(stdout);
 
     json j_params;
-    j_params["rms_norm_eps"] = params.rms_norm_eps;
     j_params["rope_freq_base"] = params.rope_freq_base;
     j_params["rope_freq_scale"] = params.rope_freq_scale;
     j_params["temp"] = params.temp;
