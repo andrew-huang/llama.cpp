@@ -77,34 +77,31 @@ You need to have [Node.js](https://nodejs.org/en) installed.
 ```bash
 mkdir llama-client
 cd llama-client
-npm init
-npm install axios
 ```
 
 Create a index.js file and put inside this:
 
 ```javascript
-const axios = require("axios");
-
 const prompt = `Building a website can be done in 10 simple steps:`;
 
 async function Test() {
-    let result = await axios.post("http://127.0.0.1:8080/completion", {
-        prompt,
-        n_predict: 512,
-    });
-
-    // the response is received until completion finish
-    console.log(result.data.content);
+    let response = await fetch("http://127.0.0.1:8080/completion", {
+        method: 'POST',
+        body: JSON.stringify({
+            prompt,
+            n_predict: 512,
+        })
+    })
+    console.log((await response.json()).content)
 }
 
-Test();
+Test()
 ```
 
 And run it:
 
 ```bash
-node .
+node index.js
 ```
 
 ## API Endpoints
@@ -126,7 +123,7 @@ node .
 
     `stream`: It allows receiving each predicted token in real-time instead of waiting for the completion to finish. To enable this, set to `true`.
 
-    `prompt`: Provide a prompt. Internally, the prompt is compared, and it detects if a part has already been evaluated, and the remaining part will be evaluate. A space is inserted in the front like main.cpp does.
+    `prompt`: Provide a prompt as a string, or as an array of strings and numbers representing tokens. Internally, the prompt is compared, and it detects if a part has already been evaluated, and the remaining part will be evaluate. If the prompt is a string, or an array with the first element given as a string, a space is inserted in the front like main.cpp does.
 
     `stop`: Specify a JSON array of stopping strings.
     These words will not be included in the completion, so make sure to add them to the prompt for the next iteration (default: []).

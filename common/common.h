@@ -28,6 +28,7 @@ struct gpt_params {
     int32_t main_gpu                        = 0;    // the GPU that is used for scratch and small tensors
     float   tensor_split[LLAMA_MAX_DEVICES] = {0};  // how split tensors should be distributed across GPUs
     int32_t n_probs                         = 0;    // if greater than 0, output the probabilities of top n_probs tokens.
+    int32_t n_beams                         = 0;    // if non-zero then use beam search of given width.
     float   rope_freq_base                  = 10000.0f; // RoPE base frequency
     float   rope_freq_scale                 = 1.0f;     // RoPE frequency scaling factor
 
@@ -64,11 +65,15 @@ struct gpt_params {
     std::string lora_adapter = "";  // lora adapter path
     std::string lora_base    = "";  // base model path for the lora adapter
 
+    int  ppl_stride        = 0;     // stride for perplexity calculations. If left at 0, the pre-existing approach will be used.
+    int  ppl_output_type   = 0;     // = 0 -> ppl output is as usual, = 1 -> ppl output is num_tokens, ppl, one per line
+                                    //                                       (which is more convenient to use for plotting)
+                                    //
     bool hellaswag         = false; // compute HellaSwag score over random tasks from datafile supplied in prompt
     size_t hellaswag_tasks = 400;   // number of tasks to use when computing the HellaSwag score
 
     bool low_vram          = false; // if true, reduce VRAM usage at the cost of performance
-    bool mul_mat_q         = false; // if true, use experimental mul_mat_q kernels
+    bool mul_mat_q         = true;  // if true, use mul_mat_q kernels instead of cuBLAS
     bool memory_f16        = true;  // use f16 instead of f32 for memory kv
     bool random_prompt     = false; // do not randomize prompt if none provided
     bool use_color         = false; // use color to distinguish generations and inputs
@@ -116,15 +121,6 @@ std::vector<llama_token> llama_tokenize(
            const std::string & text,
                         bool   add_bos);
 
-std::vector<llama_token> llama_tokenize_bpe(
-        struct llama_context * ctx,
-           const std::string & text,
-                        bool   add_bos);
-
 std::string llama_token_to_str(
         const struct llama_context * ctx,
                        llama_token   token);
-
-std::string llama_token_to_str_bpe(
-    const struct llama_context * ctx,
-                   llama_token   token);
