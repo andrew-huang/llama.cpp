@@ -191,8 +191,10 @@ int process_prompt(const std::string &prompt, const gpt_params &params, std::vec
 
     std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
+    const bool is_spm = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
+
     std::vector<llama_token> embd_inp =
-        ::llama_tokenize(ctx, prompt.c_str(), true);
+        ::llama_tokenize(ctx, prompt.c_str(), is_spm);
 
     int n_past = 0;
 
@@ -402,6 +404,8 @@ int main(int argc, char ** argv) {
         seeds.push_back(params.seed);
     }
 
+    const bool is_spm = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
+
     int test_count = 0;
     if (prompt_runner_conf.find("prompt_tests") != prompt_runner_conf.end()) {
         test_count = prompt_runner_conf["prompt_tests"].size();
@@ -469,7 +473,7 @@ int main(int argc, char ** argv) {
                     return 1;
                 }
 
-                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), true);
+                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), is_spm);
 
                 // Tokenize negative prompt
                 const int n_ctx = llama_n_ctx(ctx);
