@@ -481,6 +481,7 @@ int main(int argc, char ** argv) {
                 embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos);
 
                 const int n_ctx = llama_n_ctx(ctx);
+                const int embd_inp_prompt_size = embd_inp.size();
 
                 if (((int) embd_inp.size() + (int) params.n_predict) > n_ctx - 4) {
                     fprintf(stderr, "%s: error: prompt is too long (%d tokens, %d predict, max %d)\n", __func__, (int) embd_inp.size(), (int) params.n_predict, n_ctx - 4);
@@ -648,7 +649,7 @@ int main(int argc, char ** argv) {
                                     j_tok_resps.push_back(
                                         make_token_respose(
                                             responses, current_test_nr,
-                                            total_tests, test_id, tokens, embd.size(), expected));
+                                            total_tests, test_id, tokens, embd_inp_prompt_size, expected));
                                 }
                             }
 
@@ -720,7 +721,7 @@ int main(int argc, char ** argv) {
                                     embd_single_id.push_back(id);
                                     j_resps.push_back(make_response(
                                         responses, current_test_nr, total_tests,
-                                        test_id, temp, seed, embd_single_id, embd.size(), expected));
+                                        test_id, temp, seed, embd_single_id, embd_inp_prompt_size, expected));
                                 }
 
                                 seeds_remaining -= 1;
@@ -781,7 +782,7 @@ int main(int argc, char ** argv) {
                     j_resps.push_back(
                         make_response(
                             responses, current_test_nr, total_tests, test_id,
-                            params.temp, seed, embd_gen, embd.size(), expected));
+                            params.temp, seed, embd_gen, embd_inp_prompt_size, expected));
                 }
 
     //            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
