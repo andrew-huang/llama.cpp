@@ -81,7 +81,7 @@ inline std::string& trim_nl(std::string& s, const char* t = ws)
 
 static std::string tokens_to_output_formatted_string(const llama_context *ctx, const llama_token token)
 {
-    std::string out = token == -1 ? "" : llama_token_to_str(ctx, token);
+    std::string out = token == -1 ? "" : llama_token_to_piece(ctx, token);
     // if first bit is 1, meaning it's a partial character
     if (out.size() > 0 && (out[0] & 0x80) == 0x80)
     {
@@ -104,7 +104,7 @@ static std::string now_timestr() {
 }
 
 json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
-    int total_tests, const std::string &test_id, json tokens, json expected)
+    int total_tests, const std::string &test_id, json tokens, size_t prompt_token_cnt, json expected)
 {
     if (cur_test_nr <= 0)
         cur_test_nr = 1;
@@ -118,7 +118,7 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
 
     std::string info_str =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
-        + "| id=" + test_id + "]: " + tokens.dump(-1);
+        + "| id=" + test_id + " #p=" + std::to_string((int) prompt_token_cnt) + "]: " + tokens.dump(-1);
     printf(
         "[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s\n",
         time_per_test, remaining, passed_time_mins, info_str.c_str());
@@ -130,6 +130,7 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
     single_response["test_id"] = test_id;
     single_response["tokens"] = tokens;
     single_response["expected"] = expected;
+    single_response["prompt_token_count"] = (int) prompt_token_cnt;
     single_response["timestamp"] = (int) time(NULL);
     single_response["time"] = now_timestr();
 
@@ -138,7 +139,7 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
 
 json make_response(std::vector<std::string> &responses, int cur_test_nr,
     int total_tests, const std::string &test_id, float temp,
-    int64_t seed, const std::vector<llama_token> &embd_gen, json expected)
+    int64_t seed, const std::vector<llama_token> &embd_gen, size_t prompt_token_cnt, json expected)
 {
     llama_context *ctx = *g_ctx;
 
@@ -161,6 +162,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
         + "| id=" + test_id
         + ", temp=" + temp_str
         + ", seed=" + std::to_string(seed)
+        + ", #p=" + std::to_string((int) prompt_token_cnt)
+        + ", #g=" + std::to_string((int) embd_gen.size())
         + "]:";
 
     std::string gen = "";
@@ -180,6 +183,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     single_response["temp"] = temp_str;
     single_response["response"] = gen;
     single_response["expected"] = expected;
+    single_response["prompt_token_count"] = (int) prompt_token_cnt;
+    single_response["generated_token_count"] = (int) embd_gen.size();
     single_response["timestamp"] = (int) time(NULL);
     single_response["time"] = now_timestr();
 
@@ -191,10 +196,9 @@ int process_prompt(const std::string &prompt, const gpt_params &params, std::vec
 
     std::fill(last_n_tokens.begin(), last_n_tokens.end(), 0);
 
-    const bool is_spm = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
+    const bool add_bos = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
 
-    std::vector<llama_token> embd_inp =
-        ::llama_tokenize(ctx, prompt.c_str(), is_spm);
+    std::vector<llama_token> embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos);
 
     int n_past = 0;
 
@@ -404,7 +408,8 @@ int main(int argc, char ** argv) {
         seeds.push_back(params.seed);
     }
 
-    const bool is_spm = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
+    // Add BOS if SPM tokenizer
+    const bool add_bos = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
 
     int test_count = 0;
     if (prompt_runner_conf.find("prompt_tests") != prompt_runner_conf.end()) {
@@ -473,13 +478,12 @@ int main(int argc, char ** argv) {
                     return 1;
                 }
 
-                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), is_spm);
+                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos);
 
-                // Tokenize negative prompt
                 const int n_ctx = llama_n_ctx(ctx);
 
-                if ((int) embd_inp.size() > n_ctx - 4) {
-                    fprintf(stderr, "%s: error: prompt is too long (%d tokens, max %d)\n", __func__, (int) embd_inp.size(), n_ctx - 4);
+                if (((int) embd_inp.size() + (int) params.n_predict) > n_ctx - 4) {
+                    fprintf(stderr, "%s: error: prompt is too long (%d tokens, %d predict, max %d)\n", __func__, (int) embd_inp.size(), (int) params.n_predict, n_ctx - 4);
                     return 1;
                 }
 
@@ -496,13 +500,13 @@ int main(int argc, char ** argv) {
                     fprintf(stderr, "%s: prompt: '%s'\n", __func__, params.prompt.c_str());
                     fprintf(stderr, "%s: number of tokens in prompt = %zu\n", __func__, embd_inp.size());
                     for (int i = 0; i < (int) embd_inp.size(); i++) {
-                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_str(ctx, embd_inp[i]).c_str());
+                        fprintf(stderr, "%6d -> '%s'\n", embd_inp[i], llama_token_to_piece(ctx, embd_inp[i]).c_str());
                     }
 
                     if (params.n_keep > 0) {
                     fprintf(stderr, "%s: static prompt based on n_keep: '", __func__);
                         for (int i = 0; i < params.n_keep; i++) {
-                            fprintf(stderr, "%s", llama_token_to_str(ctx, embd_inp[i]).c_str());
+                            fprintf(stderr, "%s", llama_token_to_piece(ctx, embd_inp[i]).c_str());
                         }
                         fprintf(stderr, "'\n");
                     }
@@ -574,7 +578,7 @@ int main(int argc, char ** argv) {
 
 //                    std::string gen = "";
 //                    for (auto id : embd) {
-//                        gen += llama_token_to_str(ctx, id);
+//                        gen += llama_token_to_piece(ctx, id);
 //                    }
 //                    printf("[[%s]]\n", gen.c_str());
 //                    fflush(stdout);
@@ -644,7 +648,7 @@ int main(int argc, char ** argv) {
                                     j_tok_resps.push_back(
                                         make_token_respose(
                                             responses, current_test_nr,
-                                            total_tests, test_id, tokens, expected));
+                                            total_tests, test_id, tokens, embd.size(), expected));
                                 }
                             }
 
@@ -716,7 +720,7 @@ int main(int argc, char ** argv) {
                                     embd_single_id.push_back(id);
                                     j_resps.push_back(make_response(
                                         responses, current_test_nr, total_tests,
-                                        test_id, temp, seed, embd_single_id, expected));
+                                        test_id, temp, seed, embd_single_id, embd.size(), expected));
                                 }
 
                                 seeds_remaining -= 1;
@@ -759,7 +763,7 @@ int main(int argc, char ** argv) {
                     {
                         std::string generated = "";
                         for (auto id : embd_gen) {
-                            generated += llama_token_to_str(ctx, id);
+                            generated += llama_token_to_piece(ctx, id);
                         }
 
                         for (const auto &matched : prompt_runner_conf["stop_sequences"])
@@ -777,13 +781,13 @@ int main(int argc, char ** argv) {
                     j_resps.push_back(
                         make_response(
                             responses, current_test_nr, total_tests, test_id,
-                            params.temp, seed, embd_gen, expected));
+                            params.temp, seed, embd_gen, embd.size(), expected));
                 }
 
     //            std::string gen_prefix = "[id=" + test_id + ", seed=" + std::to_string(seed) + "]: ";
     //            std::string gen = "";
     //            for (auto id : embd_gen) {
-    //                gen += llama_token_to_str(ctx, id);
+    //                gen += llama_token_to_piece(ctx, id);
     //            }
     //            printf("%s %s\n", gen_prefix.c_str(), gen.c_str());
     //            fflush(stdout);
