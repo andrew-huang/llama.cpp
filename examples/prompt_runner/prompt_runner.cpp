@@ -354,12 +354,16 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "\n");
     }
 
+    // Add BOS if SPM tokenizer
+    const bool add_bos = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
 
     // tokenize the prompt
     std::vector<llama_token> embd_inp;
 
-    // Add a space in front of the first character to match OG llama tokenizer behavior
-    params.prompt.insert(0, 1, ' ');
+    if (add_bos) {
+        // Add a space in front of the first character to match OG llama tokenizer behavior
+        params.prompt.insert(0, 1, ' ');
+    }
 
     // do one empty run to warm up the model
     {
@@ -407,9 +411,6 @@ int main(int argc, char ** argv) {
     } else {
         seeds.push_back(params.seed);
     }
-
-    // Add BOS if SPM tokenizer
-    const bool add_bos = llama_vocab_type(ctx) == LLAMA_VOCAB_TYPE_SPM;
 
     int test_count = 0;
     if (prompt_runner_conf.find("prompt_tests") != prompt_runner_conf.end()) {
