@@ -5,10 +5,14 @@ set(TARGET common)
 add_library(${TARGET} OBJECT
     common.h
     common.cpp
+    sampling.h
+    sampling.cpp
     console.h
     console.cpp
     grammar-parser.h
     grammar-parser.cpp
+    train.h
+    train.cpp
     )
 
 if (BUILD_SHARED_LIBS)
