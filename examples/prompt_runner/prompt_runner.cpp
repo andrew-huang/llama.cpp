@@ -502,9 +502,18 @@ int main(int argc, char ** argv) {
 
                     if ((int) embd_inp.size() <= n_consumed) {
                         if (record_next_token_info) {
-                            llama_token_data_array candidates_p =
-                                { ctx_sampling->cur.data(), ctx_sampling->cur.size(), false };
+                            const int n_vocab = llama_n_vocab(model);
 
+                            float * logits = llama_get_logits_ith(ctx, 0);
+
+                            std::vector<llama_token_data> cur;
+                            for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+                                cur.emplace_back(
+                                    llama_token_data{token_id, logits[token_id], 0.0f});
+                            }
+
+                            llama_token_data_array candidates_p =
+                                { cur.data(), cur.size(), false };
                             llama_sample_softmax(nullptr, &candidates_p);
 
                             json tokens;
@@ -528,6 +537,7 @@ int main(int argc, char ** argv) {
                                         total_tests, test_id, tokens, embd_inp_prompt_size, expected));
                             }
                         }
+
 
                         // The sample_seeds mechanism is a cheat, for the case where we just only
                         // need the next token. We just reroll the selected candidate and
