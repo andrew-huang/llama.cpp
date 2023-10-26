@@ -1,6 +1,5 @@
 #include "common.h"
 #include "llama.h"
-#include "build-info.h"
 
 #include <cmath>
 #include <cstdio>
@@ -28,9 +27,10 @@ struct results_log_softmax {
     float  prob;
 };
 
-void write_logfile(const llama_context * ctx, const gpt_params & params,
-                   const llama_model * model, const struct results_perplexity & results) {
-
+static void write_logfile(
+    const llama_context * ctx, const gpt_params & params, const llama_model * model,
+    const struct results_perplexity & results
+) {
     if (params.logdir.empty()) {
         return;
     }
@@ -76,7 +76,7 @@ void write_logfile(const llama_context * ctx, const gpt_params & params,
     fclose(logfile);
 }
 
-std::vector<float> softmax(const std::vector<float>& logits) {
+static std::vector<float> softmax(const std::vector<float>& logits) {
     std::vector<float> probs(logits.size());
     float max_logit = logits[0];
     for (float v : logits) max_logit = std::max(max_logit, v);
@@ -92,7 +92,7 @@ std::vector<float> softmax(const std::vector<float>& logits) {
     return probs;
 }
 
-results_log_softmax log_softmax(int n_vocab, const float * logits, int tok) {
+static results_log_softmax log_softmax(int n_vocab, const float * logits, int tok) {
     float max_logit = logits[0];
     for (int i = 1; i < n_vocab; ++i) max_logit = std::max(max_logit, logits[i]);
     double sum_exp = 0.0;
@@ -100,9 +100,10 @@ results_log_softmax log_softmax(int n_vocab, const float * logits, int tok) {
     return {logits[tok] - max_logit - log(sum_exp), logits[tok], expf(logits[tok] - max_logit) / (float) sum_exp};
 }
 
-void process_logits(int n_vocab, const float * logits, const int * tokens, int n_token, std::vector<std::thread> & workers,
-        double & nll, double & nll2, float * logit_history, float * prob_history) {
-
+static void process_logits(
+    int n_vocab, const float * logits, const int * tokens, int n_token, std::vector<std::thread> & workers,
+    double & nll, double & nll2, float * logit_history, float * prob_history
+) {
     std::mutex mutex;
     int counter = 0;
     auto compute = [&mutex, &counter, &nll, &nll2, logit_history, prob_history, n_vocab, logits, tokens, n_token] () {
@@ -130,7 +131,7 @@ void process_logits(int n_vocab, const float * logits, const int * tokens, int n
 
 }
 
-results_perplexity perplexity_v2(llama_context * ctx, const gpt_params & params) {
+static results_perplexity perplexity_v2(llama_context * ctx, const gpt_params & params) {
     // Download: https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-raw-v1.zip?ref=salesforce-research
     // Run `./perplexity -m models/7B/ggml-model-q4_0.bin -f wiki.test.raw`
     // Output: `perplexity: 13.5106 [114/114]`
@@ -142,6 +143,14 @@ results_perplexity perplexity_v2(llama_context * ctx, const gpt_params & params)
     fprintf(stderr, "%s: tokenizing the input ..\n", __func__);
 
     std::vector<llama_token> tokens = ::llama_tokenize(ctx, params.prompt, add_bos);
+
+    if (int(tokens.size()) < 2*params.n_ctx) {
+        fprintf(stderr, "%s: you need at least %d tokens to evaluate perplexity with a context of %d\n",__func__,2*params.n_ctx,
+                params.n_ctx);
+        fprintf(stderr, "%s: the data file you provided tokenizes to only %zu tokens\n",__func__,tokens.size());
+        return {std::move(tokens), 0., {}, {}};
+    }
+
     std::vector<float>       logit_history;
     std::vector<float>       prob_history;
 
@@ -252,8 +261,7 @@ results_perplexity perplexity_v2(llama_context * ctx, const gpt_params & params)
     return {tokens, std::exp(nll / count), logit_history, prob_history};
 }
 
-results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
-
+static results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
     if (params.ppl_stride > 0) {
         return perplexity_v2(ctx, params);
     }
@@ -273,6 +281,13 @@ results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
 
     auto tim2 = std::chrono::high_resolution_clock::now();
     fprintf(stderr, "%s: tokenization took %g ms\n",__func__,1e-3*std::chrono::duration_cast<std::chrono::microseconds>(tim2-tim1).count());
+
+    if (int(tokens.size()) < 2*params.n_ctx) {
+        fprintf(stderr, "%s: you need at least %d tokens to evaluate perplexity with a context of %d\n",__func__,2*params.n_ctx,
+                params.n_ctx);
+        fprintf(stderr, "%s: the data file you provided tokenizes to only %zu tokens\n",__func__,tokens.size());
+        return {std::move(tokens), 0., {}, {}};
+    }
 
     std::vector<float> logit_history;
     logit_history.resize(tokens.size());
@@ -353,7 +368,7 @@ results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
         // Example, we have a context window of 512, we will compute perplexity for each of the
         // last 256 tokens.  Then, we split the input up into context window size chunks to
         // process the entire prompt.
-        const int first = std::min(512, params.n_ctx/2);
+        const int first = params.n_ctx/2;
         process_logits(n_vocab, logits.data() + first*n_vocab, tokens.data() + start + first, params.n_ctx - 1 - first,
                        workers, nll, nll2, logit_history.data() + start + first, prob_history.data() + start + first);
         count += params.n_ctx - first - 1;
@@ -385,8 +400,9 @@ results_perplexity perplexity(llama_context * ctx, const gpt_params & params) {
     return {tokens, ppl, logit_history, prob_history};
 }
 
-std::vector<float> hellaswag_evaluate_tokens(llama_context * ctx, const std::vector<int>& tokens, int n_past, int n_batch,
-        int n_vocab, int n_thread) {
+static std::vector<float> hellaswag_evaluate_tokens(
+    llama_context * ctx, const std::vector<int>& tokens, int n_past, int n_batch, int n_vocab, int n_thread
+) {
     std::vector<float> result;
     result.reserve(tokens.size() * n_vocab);
     size_t n_chunk = (tokens.size() + n_batch - 1)/n_batch;
@@ -406,7 +422,7 @@ std::vector<float> hellaswag_evaluate_tokens(llama_context * ctx, const std::vec
     return result;
 }
 
-void hellaswag_score(llama_context * ctx, const gpt_params & params) {
+static void hellaswag_score(llama_context * ctx, const gpt_params & params) {
     // Calculates hellaswag score (acc_norm) from prompt
     //
     // Data extracted from the HellaSwag validation dataset (MIT license) https://github.com/rowanz/hellaswag/blob/master/data/hellaswag_val.jsonl
@@ -640,7 +656,7 @@ int main(int argc, char ** argv) {
     gpt_params params;
 
     params.n_batch = 512;
-    if (gpt_params_parse(argc, argv, params) == false) {
+    if (!gpt_params_parse(argc, argv, params)) {
         return 1;
     }
 
@@ -653,12 +669,7 @@ int main(int argc, char ** argv) {
         params.n_ctx += params.ppl_stride/2;
     }
 
-    if (params.n_ctx > 2048) {
-        fprintf(stderr, "%s: warning: model might not support context sizes greater than 2048 tokens (%d specified);"
-                "expect poor results\n", __func__, params.n_ctx);
-    }
-
-    fprintf(stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER, BUILD_COMMIT);
+    print_build_info();
 
     if (params.seed == LLAMA_DEFAULT_SEED) {
         params.seed = time(NULL);
@@ -681,6 +692,12 @@ int main(int argc, char ** argv) {
     if (model == NULL) {
         fprintf(stderr, "%s: error: unable to load model\n", __func__);
         return 1;
+    }
+
+    const int n_ctx_train = llama_n_ctx_train(ctx);
+    if (params.n_ctx > n_ctx_train) {
+        fprintf(stderr, "%s: warning: model was trained on only %d context tokens (%d specified)\n",
+                __func__, n_ctx_train, params.n_ctx);
     }
 
     // print system information

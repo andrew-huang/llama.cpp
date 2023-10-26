@@ -1,5 +1,6 @@
 #include "ggml.h"
 #include "llama.h"
+#include "common.h"
 
 #include <unordered_map>
 #include <vector>
@@ -75,7 +76,7 @@ typedef struct {
     int seq_len; // max sequence length
 } Config;
 
-typedef struct {
+struct TransformerWeights {
     // token embedding table
     float* token_embedding_table;    // (vocab_size, dim)
     // weights for rmsnorms
@@ -97,9 +98,24 @@ typedef struct {
     // float* freq_cis_imag; // (seq_len, dim/2)
     // (optional) classifier weights for the logits, on the last layer
     float* wcls;
-} TransformerWeights;
 
-void malloc_weights(TransformerWeights* w, Config* p, bool shared_weights) {
+    ~TransformerWeights() {
+        delete[] token_embedding_table;
+        delete[] rms_att_weight;
+        delete[] rms_ffn_weight;
+        delete[] wq;
+        delete[] wk;
+        delete[] wv;
+        delete[] wo;
+        delete[] w1;
+        delete[] w2;
+        delete[] w3;
+        delete[] rms_final_weight;
+        delete[] wcls;
+    }
+};
+
+static void malloc_weights(TransformerWeights* w, Config* p, bool shared_weights) {
     // we calloc instead of malloc to keep valgrind happy
     w->token_embedding_table = new float[p->vocab_size * p->dim]();
     printf("[%s:AK] Allocating [%d] x [%d] = [%d] float space for w->token_embedding_table\n",__func__,p->vocab_size , p->dim, p->vocab_size * p->dim);
@@ -142,7 +158,7 @@ void malloc_weights(TransformerWeights* w, Config* p, bool shared_weights) {
     }
 }
 
-int checkpoint_init_weights(TransformerWeights *w, Config* p, FILE* f, bool shared_weights) {
+static int checkpoint_init_weights(TransformerWeights *w, Config* p, FILE* f, bool shared_weights) {
     if (fread(w->token_embedding_table, sizeof(float), p->vocab_size * p->dim, f) != static_cast<size_t>(p->vocab_size * p->dim)) return 1;
     if (fread(w->rms_att_weight, sizeof(float), p->n_layers * p->dim, f) != static_cast<size_t>(p->n_layers * p->dim)) return 1;
     if (fread(w->wq, sizeof(float), p->n_layers * p->dim * p->dim, f) != static_cast<size_t>(p->n_layers * p->dim * p->dim)) return 1;
@@ -173,22 +189,7 @@ int checkpoint_init_weights(TransformerWeights *w, Config* p, FILE* f, bool shar
     return 0;
 }
 
-void free_weights(TransformerWeights* w) {
-    delete w->token_embedding_table;
-    delete w->rms_att_weight;
-    delete w->rms_ffn_weight;
-    delete w->wq;
-    delete w->wk;
-    delete w->wv;
-    delete w->wo;
-    delete w->w1;
-    delete w->w2;
-    delete w->w3;
-    delete w->rms_final_weight;
-    if (w->wcls) delete w->wcls;
-}
-
-void print_sample_weights(TransformerWeights *w){
+static void print_sample_weights(TransformerWeights *w){
     printf("----- Quick print of first of the weight vales of all the variables\n");
     printf("%f\n", w->token_embedding_table[0]);
     printf("%f\n", w->rms_att_weight[0]);
@@ -323,7 +324,7 @@ struct train_params {
     int mem_compute1_gb;
 };
 
-void print_params(struct my_llama_hparams * params) {
+static void print_params(struct my_llama_hparams * params) {
     printf("%s: n_vocab: %d\n", __func__, params->n_vocab);
     printf("%s: n_ctx:   %d\n", __func__, params->n_ctx);
     printf("%s: n_embd:  %d\n", __func__, params->n_embd);
@@ -334,7 +335,7 @@ void print_params(struct my_llama_hparams * params) {
     printf("%s: n_rot:   %d\n", __func__, params->n_rot);
 }
 
-void init_model(struct my_llama_model * model) {
+static void init_model(struct my_llama_model * model) {
     const auto & hparams = model->hparams;
 
     const uint32_t n_embd  = hparams.n_embd;
@@ -407,17 +408,17 @@ void init_model(struct my_llama_model * model) {
     }
 }
 
-float get_f32_2d(struct ggml_tensor * tensor, int64_t i0, int64_t i1) {
+static float get_f32_2d(struct ggml_tensor * tensor, int64_t i0, int64_t i1) {
     float * ptr = (float *) ((char *) tensor->data + i0*tensor->nb[0] + i1*tensor->nb[1]);
     return *ptr;
 }
 
-int32_t get_i32_2d(struct ggml_tensor * tensor, int64_t i0, int64_t i1) {
+static int32_t get_i32_2d(struct ggml_tensor * tensor, int64_t i0, int64_t i1) {
     int32_t * ptr = (int32_t *) ((char *) tensor->data + i0*tensor->nb[0] + i1*tensor->nb[1]);
     return *ptr;
 }
 
-void print_row(struct ggml_tensor * probs, int i) {
+static void print_row(struct ggml_tensor * probs, int i) {
     for (int k = 0; k < probs->ne[0]; ++k) {
         float p = get_f32_2d(probs, k, i);
         printf(" %f", p);
@@ -425,7 +426,7 @@ void print_row(struct ggml_tensor * probs, int i) {
     printf("\n");
 }
 
-void print_matrix(struct ggml_tensor * probs) {
+static void print_matrix(struct ggml_tensor * probs) {
     assert(probs->n_dims == 2);
     for (int i = 0; i < probs->ne[1]; ++i) {
         for (int k = 0; k < probs->ne[0]; ++k) {
@@ -499,10 +500,10 @@ struct llama_file {
         errno = 0;
         std::size_t ret = std::fread(ptr, size, 1, fp);
         if (ferror(fp)) {
-            throw std::runtime_error(format("read error: %s", strerror(errno)));
+            die_fmt("fread failed: %s", strerror(errno));
         }
         if (ret != 1) {
-            throw std::runtime_error(std::string("unexpectedly reached end of file"));
+            die("unexpectedly reached end of file");
         }
     }
 
@@ -530,7 +531,7 @@ struct llama_file {
     }
 };
 
-bool is_ggml_file(const char *filename) {
+static bool is_ggml_file(const char * filename) {
     llama_file file(filename, "rb");
     if (file.size < 4) {
         return false;
@@ -539,7 +540,7 @@ bool is_ggml_file(const char *filename) {
     return magic == GGUF_MAGIC;
 }
 
-static std::string llama_escape_whitespaces(const std::string& text) {
+static std::string llama_escape_whitespaces(const std::string & text) {
     std::ostringstream out;
     for (char c : text) {
         if (c == ' ') out << "\xe2\x96\x81";
@@ -548,7 +549,7 @@ static std::string llama_escape_whitespaces(const std::string& text) {
     return out.str();
 }
 
-void load_vocab(const char *filename, Config *config, struct llama_vocab *vocab) {
+static void load_vocab(const char *filename, Config *config, struct llama_vocab *vocab) {
     if (is_ggml_file(filename)) {
         struct ggml_context * ctx_data = NULL;
 
@@ -596,6 +597,9 @@ void load_vocab(const char *filename, Config *config, struct llama_vocab *vocab)
         // assume llama2.c vocabulary
         printf("Assuming llama2.c vocabulary since %s is not a gguf file\n", filename);
         llama_file file(filename, "rb");
+        if (!file.fp) {
+            die_fmt("%s: %s", strerror(errno), filename);
+        }
         const int  n_vocab = config->vocab_size;
         /* uint32_t max_token_length =  */ file.read_u32(); // unused
         vocab->id_to_token.resize(n_vocab);
@@ -633,7 +637,7 @@ void load_vocab(const char *filename, Config *config, struct llama_vocab *vocab)
     }
 }
 
-void stuff_karpathy_weights_into_gg(struct ggml_tensor * gg_weights, float * karpathy_weights){
+static void convert_weights_ak_to_gg(struct ggml_tensor * gg_weights, const float * karpathy_weights) {
     int ct;
     switch (gg_weights->n_dims){
         case 1:
@@ -669,14 +673,16 @@ void stuff_karpathy_weights_into_gg(struct ggml_tensor * gg_weights, float * kar
     }
 }
 
-void save_as_llama_model(struct llama_vocab * vocab, struct my_llama_model * model, TransformerWeights* w, const char * filename) {
-    // stuff AK weights into GG weights one by one.
+static void save_as_llama_model(
+    struct llama_vocab * vocab, struct my_llama_model * model, TransformerWeights* w, const char * filename
+) {
+    // convert AK weights into GG weights one by one.
     // w->token_embedding_table -> model->tok_embeddings
     // float*                   -> struct ggml_tensor
-    stuff_karpathy_weights_into_gg(model->tok_embeddings, w->token_embedding_table);
-    stuff_karpathy_weights_into_gg(model->output, w->wcls ? w->wcls : w->token_embedding_table);
+    convert_weights_ak_to_gg(model->tok_embeddings, w->token_embedding_table);
+    convert_weights_ak_to_gg(model->output, w->wcls ? w->wcls : w->token_embedding_table);
 
-    stuff_karpathy_weights_into_gg(model->norm, w->rms_final_weight);
+    convert_weights_ak_to_gg(model->norm, w->rms_final_weight);
     //print_row(model->norm, 0);
 
     // for rms-att-weight
@@ -686,18 +692,18 @@ void save_as_llama_model(struct llama_vocab * vocab, struct my_llama_model * mod
     for (uint32_t i = 0; i < model->hparams.n_layer; ++i){
         auto & layer = model->layers[i];
         // 1d
-        stuff_karpathy_weights_into_gg(layer.attention_norm, &w->rms_att_weight[i*row_length]);
-        stuff_karpathy_weights_into_gg(layer.ffn_norm      , &w->rms_ffn_weight[i*row_length]);
+        convert_weights_ak_to_gg(layer.attention_norm, &w->rms_att_weight[i*row_length]);
+        convert_weights_ak_to_gg(layer.ffn_norm      , &w->rms_ffn_weight[i*row_length]);
 
         // from 3d matrix layer x dim x dim to 2d matrix dim x dim
-        stuff_karpathy_weights_into_gg(layer.wq            , &w->wq[i*row_length*row_length]);
-        stuff_karpathy_weights_into_gg(layer.wk            , &w->wk[i*row_length*row_length]);
-        stuff_karpathy_weights_into_gg(layer.wv            , &w->wv[i*row_length*row_length]);
-        stuff_karpathy_weights_into_gg(layer.wo            , &w->wo[i*row_length*row_length]);
+        convert_weights_ak_to_gg(layer.wq            , &w->wq[i*row_length*row_length]);
+        convert_weights_ak_to_gg(layer.wk            , &w->wk[i*row_length*row_length]);
+        convert_weights_ak_to_gg(layer.wv            , &w->wv[i*row_length*row_length]);
+        convert_weights_ak_to_gg(layer.wo            , &w->wo[i*row_length*row_length]);
 
-        stuff_karpathy_weights_into_gg(layer.w1            , &w->w1[i*row_length*n_ff]);
-        stuff_karpathy_weights_into_gg(layer.w2            , &w->w2[i*n_ff*row_length]);
-        stuff_karpathy_weights_into_gg(layer.w3            , &w->w3[i*row_length*n_ff]);
+        convert_weights_ak_to_gg(layer.w1            , &w->w1[i*row_length*n_ff]);
+        convert_weights_ak_to_gg(layer.w2            , &w->w2[i*n_ff*row_length]);
+        convert_weights_ak_to_gg(layer.w3            , &w->w3[i*row_length*n_ff]);
     }
 
     struct gguf_context * ctx = gguf_init_empty();
@@ -781,7 +787,7 @@ void save_as_llama_model(struct llama_vocab * vocab, struct my_llama_model * mod
     gguf_free(ctx);
 }
 
-struct train_params get_default_train_params() {
+static struct train_params get_default_train_params() {
     struct train_params params;
     params.fn_vocab_model    = "models/7B/ggml-model-f16.gguf";
     params.fn_llama2c_output_model = "ak_llama_model.bin";
@@ -831,7 +837,7 @@ struct train_params get_default_train_params() {
     return params;
 }
 
-void print_usage(int /*argc*/, char ** argv, const struct train_params * params) {
+static void print_usage(int /*argc*/, char ** argv, const struct train_params * params) {
     fprintf(stderr, "usage: %s [options]\n", argv[0]);
     fprintf(stderr, "\n");
     fprintf(stderr, "options:\n");
@@ -842,7 +848,7 @@ void print_usage(int /*argc*/, char ** argv, const struct train_params * params)
     fprintf(stderr, "\n");
 }
 
-bool params_parse(int argc, char ** argv, struct train_params * params) {
+static bool params_parse(int argc, char ** argv, struct train_params * params) {
     bool invalid_param = false;
     bool reqd_param_found = false;
     std::string arg;
@@ -897,8 +903,8 @@ bool params_parse(int argc, char ** argv, struct train_params * params) {
     return true;
 }
 
-std::string basename(const std::string &path) {
-    size_t pos = path.find_last_of("/");
+static std::string basename(const std::string &path) {
+    size_t pos = path.find_last_of("/\\");
     if (pos == std::string::npos) {
         return path;
     }
@@ -911,7 +917,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
     Config config;
-    TransformerWeights weights;
+    TransformerWeights weights = {};
     {
         FILE *file = fopen(params.fn_llama2c_model, "rb");
         if (!file) { printf("Unable to open the checkpoint file %s!\n", params.fn_llama2c_model); return 1; }
@@ -953,6 +959,5 @@ int main(int argc, char ** argv) {
     printf("Saving llama.c model file %s in ggml format at %s\n", params.fn_llama2c_model, params.fn_llama2c_output_model);
 
     ggml_free(model.ctx);
-    free_weights(&weights);
     return 0;
 }
