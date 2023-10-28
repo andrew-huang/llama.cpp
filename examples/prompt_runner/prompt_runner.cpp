@@ -36,6 +36,8 @@
 #include <signal.h>
 #endif
 
+#include "grammar-parser.h"
+
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
@@ -226,6 +228,16 @@ int main(int argc, char ** argv) {
 
     llama_sampling_params & sparams = params.sparams;
 
+    if (!sparams.grammar.empty()) {
+        grammar_parser::parse_state parsed_grammar;
+        parsed_grammar = grammar_parser::parse(sparams.grammar.c_str());
+
+        fprintf(stderr, "%s: grammar:\n", __func__);
+        grammar_parser::print_grammar(stderr, parsed_grammar);
+        fprintf(stderr, "\n");
+        fflush(stderr);
+    }
+
     std::string filename = "prompt_runner_config.json";
     std::ifstream file(filename);
     if (!file) {
@@ -286,6 +298,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "%s: error: unable to load model\n", __func__);
         return 1;
     }
+    fprintf(stderr, "loaded model\n");
+    fflush(stderr);
 
     const int n_ctx_train = llama_n_ctx_train(model);
     const int n_ctx = llama_n_ctx(ctx);
@@ -406,6 +420,9 @@ int main(int argc, char ** argv) {
 
         printf("------------------------\n%s", repl_info.c_str());
         fflush(stdout);
+
+        fprintf(stderr, "PROMPT-RUNNER-START\n");
+        fflush(stderr);
 
         for (auto &temp : temps) {
             sparams.temp = temp;
