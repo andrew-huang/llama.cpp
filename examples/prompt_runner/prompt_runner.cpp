@@ -19,6 +19,7 @@
 #include <iomanip>
 #include <fstream>
 #include <sstream>
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <regex>
@@ -170,8 +171,13 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
         gen += tokens_to_output_formatted_string(ctx, id);
     }
 
+    std::string print_gen = gen;
+    std::replace(print_gen.begin(), print_gen.end(), '\r', ' ');
+    std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
+    std::replace(print_gen.begin(), print_gen.end(), '\t', '/');
+
     printf("[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s %s\n",
-        time_per_test, remaining, passed_time_mins, gen_prefix.c_str(), gen.c_str());
+        time_per_test, remaining, passed_time_mins, gen_prefix.c_str(), print_gen.c_str());
     fflush(stdout);
 
     responses.push_back(gen_prefix + gen);
