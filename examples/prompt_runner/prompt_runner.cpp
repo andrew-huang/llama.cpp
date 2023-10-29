@@ -112,7 +112,9 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
 
     float passed_time_mins = ((float) passed_time) / 60.0;
 
-    std::string expected_s = expected;
+    std::string expected_s = "-";
+    if (expected.is_string())
+        expected_s = expected.template get<std::string>();
 
     std::string info_str =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
@@ -168,7 +170,9 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
 
     float passed_time_mins = ((float) passed_time) / 60.0;
 
-    std::string expected_s = expected;
+    std::string expected_s = "-";
+    if (expected.is_string())
+        expected_s = expected.template get<std::string>();
 
     std::string gen_prefix =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
@@ -401,6 +405,9 @@ int main(int argc, char ** argv) {
 
     benchmark_start_time = time(NULL);
 
+    fprintf(stderr, "PROMPT-RUNNER-START\n");
+    fflush(stderr);
+
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         std::string prompt = params.prompt;
 
@@ -440,9 +447,6 @@ int main(int argc, char ** argv) {
 
         printf("------------------------\n%s", repl_info.c_str());
         fflush(stdout);
-
-        fprintf(stderr, "PROMPT-RUNNER-START\n");
-        fflush(stderr);
 
         for (auto &temp : temps) {
             sparams.temp = temp;
