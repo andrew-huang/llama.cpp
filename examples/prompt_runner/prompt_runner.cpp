@@ -112,11 +112,22 @@ json make_token_respose(std::vector<std::string> &responses, int cur_test_nr,
 
     float passed_time_mins = ((float) passed_time) / 60.0;
 
+    std::string expected_s = expected;
+
     std::string info_str =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
-        + "| id=" + test_id + " #p=" + std::to_string((int) prompt_token_cnt) + "]: " + tokens.dump(-1);
+        + "| id=" + test_id + " #p=" + std::to_string((int) prompt_token_cnt) + " #e=" + expected_s +"]: ";
+
+    for (const auto &tok: tokens) {
+        char buf[128];
+        float prob = tok[1];
+        std::string t = tok[0];
+        snprintf(buf, 127, "[%s: %1.4f]", t.c_str(), prob);
+        info_str += buf;
+    }
+
     printf(
-        "[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s\n",
+        "[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s\n",
         time_per_test, remaining, passed_time_mins, info_str.c_str());
     fflush(stdout);
 
@@ -157,6 +168,8 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
 
     float passed_time_mins = ((float) passed_time) / 60.0;
 
+    std::string expected_s = expected;
+
     std::string gen_prefix =
         "[" + std::to_string(cur_test_nr) + "/" + std::to_string(total_tests)
         + "| id=" + test_id
@@ -164,6 +177,7 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
         + ", seed=" + std::to_string(seed)
         + ", #p=" + std::to_string((int) prompt_token_cnt)
         + ", #g=" + std::to_string((int) embd_gen.size())
+        + ", #e=" + expected_s
         + "]:";
 
     std::string gen = "";
@@ -176,7 +190,7 @@ json make_response(std::vector<std::string> &responses, int cur_test_nr,
     std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
     std::replace(print_gen.begin(), print_gen.end(), '\t', '/');
 
-    printf("[s/t=%5.2fs [eta=%5.1fm, t=%5.1fm]] %s %s\n",
+    printf("[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s %s\n",
         time_per_test, remaining, passed_time_mins, gen_prefix.c_str(), print_gen.c_str());
     fflush(stdout);
 
@@ -537,6 +551,18 @@ int main(int argc, char ** argv) {
 
                             llama_token_data_array candidates_p =
                                 { cur.data(), cur.size(), false };
+
+                            llama_sample_grammar(ctx, &candidates_p, ctx_sampling->grammar);
+
+                            // Explicitly refuse the " " token.
+                            for (size_t i = 0; i < candidates_p.size; ++i) {
+                                const llama_token id    = candidates_p.data[i].id;
+                                const std::string piece = llama_token_to_piece(ctx, id);
+                                if (piece == " ") {
+                                    candidates_p.data[i].logit = -INFINITY;
+                                }
+                            }
+
                             llama_sample_softmax(nullptr, &candidates_p);
 
                             json tokens;
