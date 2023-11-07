@@ -273,15 +273,23 @@ struct PromptProcessor {
     struct llama_sampling_context *ctx_sampling;
     int last_response_tok_count;
     std::string last_raw_response;
+    bool broken_rep_pen;
 
     PromptProcessor(int batch, struct llama_sampling_context *ctxs,
                     json prompt_runner_conf)
         : n_past(0),
           n_batch(batch),
           ctx_sampling(ctxs),
-          last_response_tok_count(0) {
+          last_response_tok_count(0),
+          broken_rep_pen(false) {
         init();
         get_stop_sequences(prompt_runner_conf);
+    }
+
+    void set_broken_rep_pen() {
+        // due to a bug in the ERP3 benchmark run only the prompt
+        // was added to repetition penalty. For backward compat we provide this.
+        broken_rep_pen = true;
     }
 
     void get_stop_sequences(json prompt_runner_conf) {
@@ -295,7 +303,8 @@ struct PromptProcessor {
 
     void add_tokens(std::vector<llama_token> tokens) {
         for (auto tok : tokens) {
-            add_token(tok);
+            embd.push_back(tok);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
         }
     }
 
@@ -303,8 +312,10 @@ struct PromptProcessor {
         // push the prompt in the sampling context in order
         // to apply repetition penalties later for the
         // prompt, we don't apply grammar rules
-        llama_sampling_accept(ctx_sampling, *g_ctx, t, false);
         embd.push_back(t);
+        if (!broken_rep_pen) {
+            llama_sampling_accept(ctx_sampling, *g_ctx, t, false);
+        }
     }
 
     void add_generated(llama_token t) {
@@ -332,6 +343,7 @@ struct PromptProcessor {
             gen += llama_token_to_piece(*g_ctx, id);
         }
         last_raw_response = gen;
+
         rtrim_nl(gen);
 
         if (without_stop_seq) {
@@ -520,8 +532,10 @@ bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
 
     for (int i = 2; i < (int)chatlog.size(); i++) {
         std::string preventry = chatlog[chatlog.size() - i];
-        int diff = ((int) preventry.size()) - (int)last.size();
-        if (diff < 0) { diff = -1 * diff; }
+        int diff = ((int)preventry.size()) - (int)last.size();
+        if (diff < 0) {
+            diff = -1 * diff;
+        }
         if (diff > 30) {
             // messages too different in size!
             continue;
@@ -911,6 +925,11 @@ int main(int argc, char **argv) {
 
                         PromptProcessor proc(params.n_batch, ctx_sampling,
                                              prompt_runner_conf);
+
+                        if (prompt_test.value("broken_rep_pen", false)) {
+                            proc.set_broken_rep_pen();
+                        }
+
                         proc.add_tokens(chat_embd_inp);
 
                         while (n_remain > 0) {
@@ -998,6 +1017,9 @@ int main(int argc, char **argv) {
 
                     PromptProcessor proc(params.n_batch, ctx_sampling,
                                          prompt_runner_conf);
+                    if (prompt_test.value("broken_rep_pen", false)) {
+                        proc.set_broken_rep_pen();
+                    }
                     proc.add_tokens(embd_inp);
 
                     int n_remain = params.n_predict;
