@@ -159,14 +159,10 @@ json make_token_respose(std::vector<std::string> &responses,
 }
 
 json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt,
-                   json prompt, bool empty_resp,
-                   json raw_chat_log);
+                   const std::string gen, int gen_tok_cnt, json prompt);
 
 json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt,
-                   json prompt, bool empty_resp,
-                   json raw_chat_log) {
+                   const std::string gen, int gen_tok_cnt, json prompt) {
     std::ostringstream oss;
     oss << std::setprecision(1) << prc.temp;
     std::string temp_str = oss.str();
@@ -210,8 +206,6 @@ json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
     single_response["response"] = gen;
     single_response["expected"] = prc.expected;
     single_response["prompt"] = prompt;
-    single_response["raw_chat"] = raw_chat_log;
-    single_response["empty_chat_respoinse"] = empty_resp;
     single_response["prompt_token_count"] = (int)prc.prompt_token_cnt;
     single_response["generated_token_count"] = gen_tok_cnt;
     single_response["timestamp"] = (int)time(NULL);
@@ -425,11 +419,11 @@ struct PromptProcessor {
     }
 };
 
-void record_token_info(std::vector<std::string> &responses, json j_tok_resps,
+void record_token_info(std::vector<std::string> &responses, json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling);
 
-void record_token_info(std::vector<std::string> &responses, json j_tok_resps,
+void record_token_info(std::vector<std::string> &responses, json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling) {
     const int n_vocab = llama_n_vocab(*g_model);
@@ -493,12 +487,61 @@ llama_token generate_sample_seeded(
 
         if (sample_seeds.size() > 0 && id != llama_token_eos(*g_model)) {
             std::string gen = tokens_to_output_formatted_string(*g_ctx, id);
-            j_resps.push_back(
-                make_response(responses, prc, gen, 1, json(), false, json()));
+            j_resps.push_back(make_response(responses, prc, gen, 1, json()));
         }
     }
 
     return id;
+}
+
+bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
+                             std::string &piece, std::string &prevlog);
+
+bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
+                             std::string &piece, std::string &prevlog) {
+    if (chatlog.size() < 2) {
+        return false;
+    }
+
+    std::string last = chatlog[chatlog.size() - 1];
+    if (last.size() < 30) {
+        return false;
+    }
+
+    // if 30 characters appear verbatim in a previous log entry:
+    int part_repetition_size = 30;
+    if (part_repetition_size > (int)last.size()) {
+        part_repetition_size = (int)last.size();
+    }
+    if (((int)last.size()) > part_repetition_size) {
+        // 75% repetition 1:1
+        part_repetition_size = ((int)last.size()) * 0.75;
+    }
+
+    for (int i = 2; i < (int)chatlog.size(); i++) {
+        std::string preventry = chatlog[chatlog.size() - i];
+        int diff = ((int) preventry.size()) - (int)last.size();
+        if (diff < 0) { diff = -1 * diff; }
+        if (diff > 30) {
+            // messages too different in size!
+            continue;
+        }
+
+        int extra = ((int)last.size()) - part_repetition_size;
+        if (extra < 0) {
+            extra = 0;
+        }
+        for (int offs = 0; offs < extra; offs++) {
+            std::string subpart = last.substr(offs, part_repetition_size);
+            if (preventry.find(subpart) != std::string::npos) {
+                piece = subpart;
+                prevlog = preventry;
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 std::string concatl(const std::vector<std::string> &l);
@@ -796,6 +839,7 @@ int main(int argc, char **argv) {
                     printf("FOOO2\n");
 
                     std::vector<std::string> chatlog;
+
                     std::string char_log_init = chat.value("char_log_init", "");
                     if (char_log_init.size() > 0) {
                         replacer.add_extra("<RESPONSE>", char_log_init);
@@ -808,8 +852,12 @@ int main(int argc, char **argv) {
 
                     bool is_char_turn = false;
                     int gen_token_count_sum = 0;
-                    json raw_chat_log;
+                    json raw_chatlog;
                     bool ended_with_empty = false;
+                    bool repeated_itself = false;
+                    std::string repeated_part;
+                    std::string repeated_log_entry;
+                    std::string repeated_current_entry;
 
                     json last_char_prompt;
                     json last_user_prompt;
@@ -893,7 +941,7 @@ int main(int argc, char **argv) {
                         logentry.push_back(whose_response);
                         logentry.push_back(gen_tok_cnt);
                         logentry.push_back(proc.last_raw_response);
-                        raw_chat_log.push_back(logentry);
+                        raw_chatlog.push_back(logentry);
 
                         gen_token_count_sum += gen_tok_cnt;
                         trim_nl(gen, " \r\n");
@@ -911,6 +959,12 @@ int main(int argc, char **argv) {
                             replacer.apply_replacements(prompt_test, log_fmt);
                         fflush(stdout);
                         chatlog.push_back(new_log);
+                        if (chatlog_has_repetitions(chatlog, repeated_part,
+                                                    repeated_log_entry)) {
+                            repeated_current_entry = new_log;
+                            repeated_itself = true;
+                            break;
+                        }
 
                         llama_sampling_free(ctx_sampling);
 
@@ -922,11 +976,21 @@ int main(int argc, char **argv) {
                     json prompt_collection;
                     prompt_collection["char"] = last_char_prompt;
                     prompt_collection["user"] = last_user_prompt;
+                    prompt_collection["raw_chatlog"] = raw_chatlog;
+                    json end_reason;
+                    end_reason["empty_response"] = ended_with_empty;
+                    end_reason["repeated_response"] = repeated_itself;
+                    if (repeated_itself) {
+                        end_reason["repeated_part"] = repeated_part;
+                        end_reason["repeated_log_entry"] = repeated_log_entry;
+                        end_reason["repeated_current_entry"] =
+                            repeated_current_entry;
+                    }
+                    prompt_collection["end_reason"] = end_reason;
 
                     j_resps.push_back(
                         make_response(responses, prun_ctx, concatl(chatlog),
-                                      gen_token_count_sum, prompt_collection,
-                                      ended_with_empty, raw_chat_log));
+                                      gen_token_count_sum, prompt_collection));
 
                 } else {
                     struct llama_sampling_context *ctx_sampling =
@@ -974,8 +1038,7 @@ int main(int argc, char **argv) {
                     int gen_tok_cnt = proc.get_last_response_token_count();
 
                     j_resps.push_back(make_response(responses, prun_ctx, gen,
-                                                    gen_tok_cnt, json(), false,
-                                                    json()));
+                                                    gen_tok_cnt, json()));
 
                     llama_sampling_free(ctx_sampling);
                 }
@@ -995,7 +1058,8 @@ int main(int argc, char **argv) {
         printf("%s\n", resp.c_str());
     }
 
-    std::string responses_json_dump = j_resps.dump(2);
+    std::string responses_json_dump =
+        j_resps.dump(2, ' ', false, json::error_handler_t::replace);
     printf("%s\n", responses_json_dump.c_str());
     fflush(stdout);
 
