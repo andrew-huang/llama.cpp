@@ -308,6 +308,31 @@ struct PromptProcessor {
         }
     }
 
+    bool generate_tokens(int n_remain) {
+        while (n_remain > 0) {
+            if (!this->process_tokens()) {
+                return true;
+            }
+
+            llama_token id =
+                llama_sampling_sample(ctx_sampling, *g_ctx, nullptr);
+
+            this->add_generated(id);
+            --n_remain;
+
+            if (this->reached_eos()) {
+                break;
+            }
+
+            if (this->reached_stop_sequence()) {
+                n_remain = 0;
+                break;
+            }
+        }
+
+        return true;
+    }
+
     void add_token(llama_token t) {
         // push the prompt in the sampling context in order
         // to apply repetition penalties later for the
@@ -587,16 +612,7 @@ int main(int argc, char **argv) {
         fflush(stderr);
     }
 
-    std::string filename = "prompt_runner_config.json";
-    std::ifstream file(filename);
-    if (!file) {
-        fprintf(stderr,
-                "error: failed to open prompt_runner_config config file '%s'\n",
-                filename.c_str());
-        return 1;
-    }
-
-    const json prompt_runner_conf = json::parse(file);
+    const json prompt_runner_conf = json::parse(params.prompt);
 
     if (prompt_runner_conf.find("prompt_tests") == prompt_runner_conf.end()) {
         fprintf(stderr, "**********\n");
@@ -763,7 +779,7 @@ int main(int argc, char **argv) {
         prun_ctx.test_id = prompt_test.value("id", "unknown_test_id");
 
         std::string prompt =
-            replacer.apply_replacements(prompt_test, params.prompt);
+            replacer.apply_replacements(prompt_test, "<PROMPT>");
         rtrim_nl(prompt);
 
         if (params.verbose_prompt) {
@@ -829,7 +845,48 @@ int main(int argc, char **argv) {
                             llama_sampling_print(sparams).c_str());
                 }
 
-                if (prompt_test.find("chat") != prompt_test.end()) {
+                if (prompt_test.find("query") != prompt_test.end()) {
+                    // "query": {
+                    //   "sampling": { "tfs-z": 0.95, "temp": 0.9 } },
+                    //   "replacements": [
+                    //      ["<U>", "<USER>:"],
+                    //      ["<C>", "<USER>:"],
+                    //   ],
+                    //   "messages": [
+                    //       {"msg":"<C> *<CHAR> sits in a library*"},
+                    //       {"msg":"<U> Hey <CHAR> *waves* I heard you had birthday, how old did you get?"},
+                    //       {"msg":"<C> Hi <USER>, yes I got",
+                    //        "query_id": "age"
+                    //        "msg_postfix": "years old.",
+                    //        "complete": { "n_gen": 10, "bnf": "\" \"? [1-9][0-9]*" },
+                    //       },
+                    //       {"msg":"<U> Amazing! You got new clothes I see, what are you wearing?"},
+                    //       {"msg":"<C> Right now I am wearing",
+                    //        "query_id": "clothes"
+                    //        "msg_postfix": ".",
+                    //        "complete": { "n_gen": 10, "top-k": 10, "dfs": true }
+                    //       },
+                    //   ],
+                    // }
+                    //
+                    // "age" would result in a multiplied probability of the resulting answer.
+                    // "clothes" would be a list of answers, each with their multiplied probabilty.
+
+                } else if (prompt_test.find("chat") != prompt_test.end()) {
+                    // "chat": {
+                    //   "user": {
+                    //       "prompt": "<PROMPT2><CHATLOG>Loki: ",
+                    //       "n_gen": 70,
+                    //       "log_fmt": "Loki: <RESPONSE>\n"
+                    //   },
+                    //   "char": {
+                    //       "prompt": "<PROMPT><CHATLOG>Aria: ",
+                    //       "n_gen": 70,
+                    //       "log_fmt": "Aria: <RESPONSE>\n"
+                    //   },
+                    //   "char_log_init": "Arias character and scenario
+                    //   described here.", "turns": 50
+                    // },
                     json chat = prompt_test["chat"];
 
                     json user_prompt;
@@ -931,27 +988,7 @@ int main(int argc, char **argv) {
                         }
 
                         proc.add_tokens(chat_embd_inp);
-
-                        while (n_remain > 0) {
-                            if (!proc.process_tokens()) {
-                                return 1;
-                            }
-
-                            llama_token id = llama_sampling_sample(
-                                ctx_sampling, ctx, nullptr);
-
-                            proc.add_generated(id);
-                            --n_remain;
-
-                            if (proc.reached_eos()) {
-                                break;
-                            }
-
-                            if (proc.reached_stop_sequence()) {
-                                n_remain = 0;
-                                break;
-                            }
-                        }
+                        proc.generate_tokens(n_remain);
 
                         std::string gen = proc.get_response(true, true);
                         int gen_tok_cnt = proc.get_last_response_token_count();
