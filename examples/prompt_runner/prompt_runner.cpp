@@ -277,6 +277,20 @@ struct TokenVec {
     }
 
     void append(llama_token id) { tokens.push_back(id); }
+    void append(TokenVec &other_vec) {
+        for (auto tok : other_vec.tokens) {
+            tokens.push_back(tok);
+        }
+        p1 = other_vec.p1;
+    }
+
+    std::string to_string() {
+        std::string p;
+        for (auto tok : tokens) {
+            p += llama_token_to_piece(*g_ctx, tok);
+        }
+        return p;
+    }
 
     void print() {
         std::string p;
@@ -324,9 +338,9 @@ struct Decoder {
 
         if (only_last_token) {
             batch = llama_batch_init(1, 0, 1);
-            printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
-                   for_output ? 1 : 0);
-            tokens.print_last();
+             printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
+                    for_output ? 1 : 0);
+            // tokens.print_last();
             llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, false);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
                                   true);
@@ -336,7 +350,7 @@ struct Decoder {
         } else {
             batch = llama_batch_init(tokens.size(), 0, 1);
             int i = 0;
-            tokens.print();
+//            tokens.print();
             printf("### batch seq_id=%d, p0=%d to p1=%ld (out=%d)\n", seq_id,
                    p0, p0 + tokens.size(), for_output ? 1 : 0);
             for (auto tok : tokens.tokens) {
@@ -407,7 +421,8 @@ struct PromptPiece {
         llama_pos offs = new_p0 - tokens.p0;
 
         llama_kv_cache_seq_cp(*g_ctx, seq_id, new_seq_id, tokens.p0, tokens.p1);
-        llama_kv_cache_seq_shift(*g_ctx, new_seq_id, tokens.p0, tokens.p1, offs);
+        llama_kv_cache_seq_shift(*g_ctx, new_seq_id, tokens.p0, tokens.p1,
+                                 offs);
 
         seq_id = new_seq_id;
         tokens.p0 = tokens.p0 + offs;
@@ -435,6 +450,38 @@ struct PromptPiece {
 
             n_tokens--;
         }
+
+        return true;
+    }
+
+    bool complete(Decoder &decoder, const std::string &next_piece,
+                  int n_tokens) {
+        TokenVec new_tokens(next_piece);
+
+        printf("START! [%s]\n", new_tokens.to_string().c_str());
+        if (!decoder.decode(new_tokens, false, tokens.p1, seq_id, true)) {
+            return false;
+        }
+
+        printf("MID! [%s]\n", new_tokens.to_string().c_str());
+        while (n_tokens > 0) {
+            if (new_tokens.tokens.back() == llama_token_eos(*g_model)) {
+                printf("got EOS\n");
+                break;
+            }
+
+            if (!decoder.decode(new_tokens, true, new_tokens.p1, seq_id,
+                                true)) {
+                return false;
+            }
+
+            n_tokens--;
+        }
+
+        std::string new_seq = new_tokens.to_string();
+        printf("APPENDING! [%s]\n", new_seq.c_str());
+        tokens.append(new_tokens);
+        tokens.print();
 
         return true;
     }
@@ -467,15 +514,17 @@ struct DualPrefixPrompt {
         //   the mid piece.
     }
 
-    void swap_prefix_and_complete(Decoder &decoder,
+    bool swap_prefix_and_complete(Decoder &decoder,
                                   const std::string &add_prompt, int n_tokens) {
+        is_at_prefix1 = !is_at_prefix1;
+
         if (is_at_prefix1) {
-            int p0 = prefix2.get_p1();
             mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
         } else {
-            int p0 = prefix1.get_p1();
             mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
         }
+
+        return mid_piece.complete(decoder, add_prompt, n_tokens);
 
         // - Copy the prefix2 into the new sequence
         // - Shift the mid_piece to the end of prefix2
@@ -1113,6 +1162,13 @@ int main(int argc, char **argv) {
                     std::string logstr = concatl(chatlog);
                     dpp.set_mid_piece(logstr);
                     dpp.init_decode(decoder);
+                    for (int i = 0; i < 100; i++) {
+                        if (i % 2 == 0) {
+                            dpp.swap_prefix_and_complete(decoder, "\nLoki: ", 70);
+                        } else {
+                            dpp.swap_prefix_and_complete(decoder, "\nAria: ", 70);
+                        }
+                    }
 
                     //                    int chat_turns = chat.value("turns",
                     //                    3);
