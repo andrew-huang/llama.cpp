@@ -1164,9 +1164,17 @@ int main(int argc, char **argv) {
                     dpp.init_decode(decoder);
                     for (int i = 0; i < 100; i++) {
                         if (i % 2 == 0) {
-                            dpp.swap_prefix_and_complete(decoder, "\nLoki: ", 70);
+                            if (i > 0) {
+                                dpp.swap_prefix_and_complete(decoder, "\nLoki: ", 70);
+                            } else {
+                                dpp.swap_prefix_and_complete(decoder, "Loki: ", 70);
+                            }
                         } else {
-                            dpp.swap_prefix_and_complete(decoder, "\nAria: ", 70);
+                            if (i > 1) {
+                                dpp.swap_prefix_and_complete(decoder, "\nAria: ", 70);
+                            } else {
+                                dpp.swap_prefix_and_complete(decoder, "Aria: ", 70);
+                            }
                         }
                     }
 
