@@ -265,12 +265,37 @@ struct TextReplacer {
 };
 
 struct TokenVec {
+    llama_pos p0;
+    llama_pos p1;
     std::vector<llama_token> tokens;
+    bool decoded;
 
-    TokenVec() {}
-    TokenVec(const std::string &prompt) {
+    TokenVec() : p0(0), p1(0), decoded(false) {}
+    TokenVec(const std::string &prompt) : p0(0), p1(0), decoded(false) {
         const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
         tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
+    }
+
+    void append(llama_token id) { tokens.push_back(id); }
+
+    void print() {
+        std::string p;
+        for (auto tok : tokens) {
+            p += llama_token_to_piece(*g_ctx, tok);
+        }
+        printf("### tokens=[%s]\n", p.c_str());
+    }
+
+    void print_last() {
+        std::string p = llama_token_to_piece(*g_ctx, get_last());
+        printf("### last_token=[%s]\n", p.c_str());
+    }
+
+    llama_token get_last() {
+        if (tokens.size() > 0) {
+            return tokens[tokens.size() - 1];
+        }
+        return 0;
     }
 
     void load_mid_piece_from(const std::string &prompt) {
@@ -280,31 +305,138 @@ struct TokenVec {
     size_t size() { return tokens.size(); }
 };
 
-int prompt_piece_seq_id = 0;
+struct Decoder {
+    struct llama_sampling_context *ctx_sampling;
 
-struct SystemPrompt {
-    int p0;
-    int p1;
-    int seq_id;
-    TokenVec tokens;
+    Decoder(const llama_sampling_params &sparams) {
+        ctx_sampling = llama_sampling_init(sparams);
+    }
 
-    SystemPrompt(const std::string &prompt) : tokens(prompt), p0(0) {
-        p1 = p0 + (int)tokens.size();
-        seq_id = prompt_piece_seq_id++;
+    llama_token sample(int idx) {
+        const llama_token id =
+            llama_sampling_sample(ctx_sampling, *g_ctx, NULL, idx);
+        return id;
+    }
+
+    bool decode(TokenVec &tokens, bool only_last_token, llama_pos p0,
+                llama_seq_id seq_id, bool for_output) {
+        llama_batch batch;
+
+        if (only_last_token) {
+            batch = llama_batch_init(1, 0, 1);
+            printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
+                   for_output ? 1 : 0);
+            tokens.print_last();
+            llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, false);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
+                                  true);
+            tokens.p0 = p0;
+            tokens.p1 = p0 + 1;
+
+        } else {
+            batch = llama_batch_init(tokens.size(), 0, 1);
+            int i = 0;
+            tokens.print();
+            printf("### batch seq_id=%d, p0=%d to p1=%ld (out=%d)\n", seq_id,
+                   p0, p0 + tokens.size(), for_output ? 1 : 0);
+            for (auto tok : tokens.tokens) {
+                llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
+                llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+                i++;
+            }
+
+            tokens.p0 = p0;
+            tokens.p1 = p0 + i;
+        }
+
+        if (for_output) {
+            batch.logits[batch.n_tokens - 1] = true;
+        }
+
+        bool ok = false;
+        if (llama_decode(*g_ctx, batch) != 0) {
+            LOG_TEE("%s: llama_decode() failed\n", __func__);
+        } else {
+            tokens.decoded = true;
+            ok = true;
+
+            if (for_output) {
+                tokens.append(sample(batch.n_tokens - 1));
+            }
+        }
+
+        llama_batch_free(batch);
+
+        return ok;
     }
 };
 
+int prompt_piece_seq_id = 0;
+
+struct SystemPrompt {
+    llama_pos p0;
+    llama_seq_id seq_id;
+    TokenVec tokens;
+
+    SystemPrompt(const std::string &prompt) : tokens(prompt), p0(0) {
+        seq_id = prompt_piece_seq_id++;
+    }
+
+    bool decode(Decoder &decoder) {
+        return decoder.decode(tokens, false, p0, seq_id, false);
+    }
+
+    llama_pos get_p1() { return tokens.p1; }
+};
+
 struct PromptPiece {
-    int p0;
-    int p1;
-    int seq_id;
+    llama_pos p0;
+    llama_seq_id seq_id;
     TokenVec tokens;
 
     void load_as_mid(const std::string &prompt) {
         p0 = 0;
-        seq_id = prompt_piece_seq_id++;
+        seq_id = 0;
         tokens.load_mid_piece_from(prompt);
-        p1 = p0 + (int)tokens.size();
+    }
+
+    llama_pos get_p0() { return tokens.p0; }
+    llama_pos get_p1() { return tokens.p1; }
+
+    void shift_to(llama_pos new_p0, llama_seq_id new_seq_id) {
+        llama_pos offs = new_p0 - tokens.p0;
+
+        llama_kv_cache_seq_cp(*g_ctx, seq_id, new_seq_id, tokens.p0, tokens.p1);
+        llama_kv_cache_seq_shift(*g_ctx, new_seq_id, tokens.p0, tokens.p1, offs);
+
+        seq_id = new_seq_id;
+        tokens.p0 = tokens.p0 + offs;
+        tokens.p1 = tokens.p1 + offs;
+        p0 = tokens.p0;
+    }
+
+    bool initial_decode(Decoder &decoder, llama_pos p0, llama_seq_id sid,
+                        int n_tokens) {
+        seq_id = sid;
+
+        if (!decoder.decode(tokens, false, p0, seq_id, n_tokens > 0)) {
+            return false;
+        }
+        if (n_tokens == 0) {
+            return true;
+        }
+
+        n_tokens--;
+
+        while (n_tokens > 0) {
+            if (!decoder.decode(tokens, true, tokens.p1, seq_id, true)) {
+                return false;
+            }
+
+            n_tokens--;
+        }
+
+        return true;
     }
 };
 
@@ -321,20 +453,34 @@ struct DualPrefixPrompt {
         mid_piece.load_as_mid(dyn_prompt_init);
     }
 
-    void init_decode(int n_tokens) {
+    bool init_decode(Decoder &decoder) {
+        if (!prefix1.decode(decoder)) return false;
+        if (!prefix2.decode(decoder)) return false;
+
+        int p1 = prefix1.get_p1();
+        return mid_piece.initial_decode(decoder, p1, prefix1.seq_id, 0);
+
         // - Decode prefix1, no token completion
         // - Decode prefix2, no token completion
-        // - Decode first continuation from the mid piece as if belonging to prefix1.
-        //          and start n_token tokens completion into the sequence of the mid piece.
+        // - Decode first continuation from the mid piece as if belonging to
+        //   prefix1. And start n_token tokens completion into the sequence of
+        //   the mid piece.
     }
 
-    void swap_prefix_and_complete(const std::string &add_prompt, int n_tokens) {
-        // - Copy the mid_piece sequence into a new sequence,
+    void swap_prefix_and_complete(Decoder &decoder,
+                                  const std::string &add_prompt, int n_tokens) {
+        if (is_at_prefix1) {
+            int p0 = prefix2.get_p1();
+            mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
+        } else {
+            int p0 = prefix1.get_p1();
+            mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
+        }
+
         // - Copy the prefix2 into the new sequence
         // - Shift the mid_piece to the end of prefix2
         // - Decode and Append add_prompt to the end of mid_piece
         // - Complete n_tokens into the mid_piece
-
     }
 };
 
@@ -944,9 +1090,10 @@ int main(int argc, char **argv) {
                         return 1;
                     }
 
-                    printf("FOOO\n");
-                    int chat_turns = chat.value("turns", 3);
-                    printf("FOOO2\n");
+                    std::string user_prompt_txt = replacer.apply_replacements(
+                        prompt_test, user_prompt.value("prompt", ""));
+                    std::string char_prompt_txt = replacer.apply_replacements(
+                        prompt_test, char_prompt.value("prompt", ""));
 
                     std::vector<std::string> chatlog;
 
@@ -960,132 +1107,191 @@ int main(int argc, char **argv) {
                         chatlog.push_back(char_log_init);
                     }
 
-                    bool is_char_turn = false;
-                    int gen_token_count_sum = 0;
-                    json raw_chatlog;
-                    bool ended_with_empty = false;
-                    bool repeated_itself = false;
-                    std::string repeated_part;
-                    std::string repeated_log_entry;
-                    std::string repeated_current_entry;
+                    DualPrefixPrompt dpp(char_prompt_txt, user_prompt_txt);
 
-                    json last_char_prompt;
-                    json last_user_prompt;
+                    Decoder decoder(sparams);
+                    std::string logstr = concatl(chatlog);
+                    dpp.set_mid_piece(logstr);
+                    dpp.init_decode(decoder);
 
-                    for (int turn_i = 0; turn_i < chat_turns; turn_i++) {
-                        std::string whose_response = "user";
-                        json chat_prompt = user_prompt;
-                        if (is_char_turn) {
-                            whose_response = "char";
-                            chat_prompt = char_prompt;
-                        }
-
-                        int n_remain = chat_prompt.value("n_gen", 100);
-                        std::string prompt =
-                            chat_prompt.value("prompt", "NO CHAT PROMPT");
-                        std::string log_fmt =
-                            chat_prompt.value("log_fmt", "<RESPONSE>");
-
-                        printf("##################################\n");
-                        std::string logstr = concatl(chatlog);
-                        printf("LOG:\n%s", logstr.c_str());
-                        fflush(stdout);
-
-                        replacer.add_extra("<CHATLOG>", logstr);
-                        prompt =
-                            replacer.apply_replacements(prompt_test, prompt);
-                        rtrim_nl(prompt);
-
-                        // d// printf("FOOO5[%s]\n", prompt.c_str());
-                        std::vector<llama_token> chat_embd_inp;
-                        chat_embd_inp = ::llama_tokenize(ctx, prompt.c_str(),
-                                                         add_bos, true);
-                        printf("########( PLEN: %ld )##############\n",
-                               chat_embd_inp.size());
-
-                        json prompt_info;
-                        prompt_info["tokens"] = (int)chat_embd_inp.size();
-                        prompt_info["prompt"] = prompt;
-
-                        if (is_char_turn) {
-                            last_char_prompt = prompt_info;
-                        } else {
-                            last_user_prompt = prompt_info;
-                        }
-                        is_char_turn = !is_char_turn;
-
-                        prun_ctx.prompt_token_cnt = chat_embd_inp.size();
-
-                        struct llama_sampling_context *ctx_sampling =
-                            llama_sampling_init(sparams);
-
-                        PromptProcessor proc(params.n_batch, ctx_sampling,
-                                             prompt_runner_conf);
-
-                        if (prompt_test.value("broken_rep_pen", false)) {
-                            proc.set_broken_rep_pen();
-                        }
-
-                        proc.add_tokens(chat_embd_inp);
-                        proc.generate_tokens(n_remain);
-
-                        std::string gen = proc.get_response(true, true);
-                        int gen_tok_cnt = proc.get_last_response_token_count();
-
-                        json logentry;
-                        logentry.push_back(whose_response);
-                        logentry.push_back(gen_tok_cnt);
-                        logentry.push_back(proc.last_raw_response);
-                        raw_chatlog.push_back(logentry);
-
-                        gen_token_count_sum += gen_tok_cnt;
-                        trim_nl(gen, " \r\n");
-                        if (gen.size() == 0) {
-                            ended_with_empty = true;
-                            printf(
-                                "EMPTY "
-                                "RESPONSE!\n################################\n%"
-                                "s\n*******************************************"
-                                "************\n",
-                                prompt.c_str());
-                        }
-                        replacer.add_extra("<RESPONSE>", gen);
-                        std::string new_log =
-                            replacer.apply_replacements(prompt_test, log_fmt);
-                        fflush(stdout);
-                        chatlog.push_back(new_log);
-                        if (chatlog_has_repetitions(chatlog, repeated_part,
-                                                    repeated_log_entry)) {
-                            repeated_current_entry = new_log;
-                            repeated_itself = true;
-                            break;
-                        }
-
-                        llama_sampling_free(ctx_sampling);
-
-                        if (gen.size() == 0) {
-                            break;
-                        }
-                    }
-
-                    json prompt_collection;
-                    prompt_collection["char"] = last_char_prompt;
-                    prompt_collection["user"] = last_user_prompt;
-                    prompt_collection["raw_chatlog"] = raw_chatlog;
-                    json end_reason;
-                    end_reason["empty_response"] = ended_with_empty;
-                    end_reason["repeated_response"] = repeated_itself;
-                    if (repeated_itself) {
-                        end_reason["repeated_part"] = repeated_part;
-                        end_reason["repeated_log_entry"] = repeated_log_entry;
-                        end_reason["repeated_current_entry"] =
-                            repeated_current_entry;
-                    }
-                    prompt_collection["end_reason"] = end_reason;
-
-                    j_resps.push_back(
-                        make_response(responses, prun_ctx, concatl(chatlog),
-                                      gen_token_count_sum, prompt_collection));
+                    //                    int chat_turns = chat.value("turns",
+                    //                    3);
+                    //
+                    //
+                    //                    std::string char_log_init =
+                    //                    chat.value("char_log_init", ""); if
+                    //                    (char_log_init.size() > 0) {
+                    //                        replacer.add_extra("<RESPONSE>",
+                    //                        char_log_init); std::string
+                    //                        log_fmt =
+                    //                            char_prompt.value("log_fmt",
+                    //                            "<RESPONSE>");
+                    //                        char_log_init =
+                    //                            replacer.apply_replacements(prompt_test,
+                    //                            log_fmt);
+                    //                        chatlog.push_back(char_log_init);
+                    //                    }
+                    //
+                    //                    bool is_char_turn = false;
+                    //                    int gen_token_count_sum = 0;
+                    //                    json raw_chatlog;
+                    //                    bool ended_with_empty = false;
+                    //                    bool repeated_itself = false;
+                    //                    std::string repeated_part;
+                    //                    std::string repeated_log_entry;
+                    //                    std::string repeated_current_entry;
+                    //
+                    //                    json last_char_prompt;
+                    //                    json last_user_prompt;
+                    //
+                    //                    for (int turn_i = 0; turn_i <
+                    //                    chat_turns; turn_i++) {
+                    //                        std::string whose_response =
+                    //                        "user"; json chat_prompt =
+                    //                        user_prompt; if (is_char_turn) {
+                    //                            whose_response = "char";
+                    //                            chat_prompt = char_prompt;
+                    //                        }
+                    //
+                    //                        int n_remain =
+                    //                        chat_prompt.value("n_gen", 100);
+                    //                        std::string prompt =
+                    //                            chat_prompt.value("prompt",
+                    //                            "NO CHAT PROMPT");
+                    //                        std::string log_fmt =
+                    //                            chat_prompt.value("log_fmt",
+                    //                            "<RESPONSE>");
+                    //
+                    //                        printf("##################################\n");
+                    //                        std::string logstr =
+                    //                        concatl(chatlog);
+                    //                        printf("LOG:\n%s",
+                    //                        logstr.c_str()); fflush(stdout);
+                    //
+                    //                        replacer.add_extra("<CHATLOG>",
+                    //                        logstr); prompt =
+                    //                            replacer.apply_replacements(prompt_test,
+                    //                            prompt);
+                    //                        rtrim_nl(prompt);
+                    //
+                    //                        // d// printf("FOOO5[%s]\n",
+                    //                        prompt.c_str());
+                    //                        std::vector<llama_token>
+                    //                        chat_embd_inp; chat_embd_inp =
+                    //                        ::llama_tokenize(ctx,
+                    //                        prompt.c_str(),
+                    //                                                         add_bos, true);
+                    //                        printf("########( PLEN: %ld
+                    //                        )##############\n",
+                    //                               chat_embd_inp.size());
+                    //
+                    //                        json prompt_info;
+                    //                        prompt_info["tokens"] =
+                    //                        (int)chat_embd_inp.size();
+                    //                        prompt_info["prompt"] = prompt;
+                    //
+                    //                        if (is_char_turn) {
+                    //                            last_char_prompt =
+                    //                            prompt_info;
+                    //                        } else {
+                    //                            last_user_prompt =
+                    //                            prompt_info;
+                    //                        }
+                    //                        is_char_turn = !is_char_turn;
+                    //
+                    //                        prun_ctx.prompt_token_cnt =
+                    //                        chat_embd_inp.size();
+                    //
+                    //                        struct llama_sampling_context
+                    //                        *ctx_sampling =
+                    //                            llama_sampling_init(sparams);
+                    //
+                    //                        PromptProcessor
+                    //                        proc(params.n_batch, ctx_sampling,
+                    //                                             prompt_runner_conf);
+                    //
+                    //                        if
+                    //                        (prompt_test.value("broken_rep_pen",
+                    //                        false)) {
+                    //                            proc.set_broken_rep_pen();
+                    //                        }
+                    //
+                    //                        proc.add_tokens(chat_embd_inp);
+                    //                        proc.generate_tokens(n_remain);
+                    //
+                    //                        std::string gen =
+                    //                        proc.get_response(true, true); int
+                    //                        gen_tok_cnt =
+                    //                        proc.get_last_response_token_count();
+                    //
+                    //                        json logentry;
+                    //                        logentry.push_back(whose_response);
+                    //                        logentry.push_back(gen_tok_cnt);
+                    //                        logentry.push_back(proc.last_raw_response);
+                    //                        raw_chatlog.push_back(logentry);
+                    //
+                    //                        gen_token_count_sum +=
+                    //                        gen_tok_cnt; trim_nl(gen, "
+                    //                        \r\n"); if (gen.size() == 0) {
+                    //                            ended_with_empty = true;
+                    //                            printf(
+                    //                                "EMPTY "
+                    //                                "RESPONSE!\n################################\n%"
+                    //                                "s\n*******************************************"
+                    //                                "************\n",
+                    //                                prompt.c_str());
+                    //                        }
+                    //                        replacer.add_extra("<RESPONSE>",
+                    //                        gen); std::string new_log =
+                    //                            replacer.apply_replacements(prompt_test,
+                    //                            log_fmt);
+                    //                        fflush(stdout);
+                    //                        chatlog.push_back(new_log);
+                    //                        if
+                    //                        (chatlog_has_repetitions(chatlog,
+                    //                        repeated_part,
+                    //                                                    repeated_log_entry))
+                    //                                                    {
+                    //                            repeated_current_entry =
+                    //                            new_log; repeated_itself =
+                    //                            true; break;
+                    //                        }
+                    //
+                    //                        llama_sampling_free(ctx_sampling);
+                    //
+                    //                        if (gen.size() == 0) {
+                    //                            break;
+                    //                        }
+                    //                    }
+                    //
+                    //                    json prompt_collection;
+                    //                    prompt_collection["char"] =
+                    //                    last_char_prompt;
+                    //                    prompt_collection["user"] =
+                    //                    last_user_prompt;
+                    //                    prompt_collection["raw_chatlog"] =
+                    //                    raw_chatlog; json end_reason;
+                    //                    end_reason["empty_response"] =
+                    //                    ended_with_empty;
+                    //                    end_reason["repeated_response"] =
+                    //                    repeated_itself; if (repeated_itself)
+                    //                    {
+                    //                        end_reason["repeated_part"] =
+                    //                        repeated_part;
+                    //                        end_reason["repeated_log_entry"] =
+                    //                        repeated_log_entry;
+                    //                        end_reason["repeated_current_entry"]
+                    //                        =
+                    //                            repeated_current_entry;
+                    //                    }
+                    //                    prompt_collection["end_reason"] =
+                    //                    end_reason;
+                    //
+                    //                    j_resps.push_back(
+                    //                        make_response(responses, prun_ctx,
+                    //                        concatl(chatlog),
+                    //                                      gen_token_count_sum,
+                    //                                      prompt_collection));
 
                 } else {
                     struct llama_sampling_context *ctx_sampling =
