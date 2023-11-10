@@ -264,6 +264,80 @@ struct TextReplacer {
     }
 };
 
+struct TokenVec {
+    std::vector<llama_token> tokens;
+
+    TokenVec() {}
+    TokenVec(const std::string &prompt) {
+        const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
+        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
+    }
+
+    void load_mid_piece_from(const std::string &prompt) {
+        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), false, true);
+    }
+
+    size_t size() { return tokens.size(); }
+};
+
+int prompt_piece_seq_id = 0;
+
+struct SystemPrompt {
+    int p0;
+    int p1;
+    int seq_id;
+    TokenVec tokens;
+
+    SystemPrompt(const std::string &prompt) : tokens(prompt), p0(0) {
+        p1 = p0 + (int)tokens.size();
+        seq_id = prompt_piece_seq_id++;
+    }
+};
+
+struct PromptPiece {
+    int p0;
+    int p1;
+    int seq_id;
+    TokenVec tokens;
+
+    void load_as_mid(const std::string &prompt) {
+        p0 = 0;
+        seq_id = prompt_piece_seq_id++;
+        tokens.load_mid_piece_from(prompt);
+        p1 = p0 + (int)tokens.size();
+    }
+};
+
+struct DualPrefixPrompt {
+    SystemPrompt prefix1;
+    SystemPrompt prefix2;
+    bool is_at_prefix1;
+    PromptPiece mid_piece;
+
+    DualPrefixPrompt(const std::string &prefix1, const std::string &prefix2)
+        : prefix1(prefix1), prefix2(prefix2), is_at_prefix1(true) {}
+
+    void set_mid_piece(const std::string &dyn_prompt_init) {
+        mid_piece.load_as_mid(dyn_prompt_init);
+    }
+
+    void init_decode(int n_tokens) {
+        // - Decode prefix1, no token completion
+        // - Decode prefix2, no token completion
+        // - Decode first continuation from the mid piece as if belonging to prefix1.
+        //          and start n_token tokens completion into the sequence of the mid piece.
+    }
+
+    void swap_prefix_and_complete(const std::string &add_prompt, int n_tokens) {
+        // - Copy the mid_piece sequence into a new sequence,
+        // - Copy the prefix2 into the new sequence
+        // - Shift the mid_piece to the end of prefix2
+        // - Decode and Append add_prompt to the end of mid_piece
+        // - Complete n_tokens into the mid_piece
+
+    }
+};
+
 struct PromptProcessor {
     std::vector<llama_token> embd;
     std::vector<llama_token> embd_gen;
@@ -301,7 +375,9 @@ struct PromptProcessor {
 
     void init() { llama_kv_cache_tokens_rm(*g_ctx, -1, -1); }
 
-    void add_tokens(std::vector<llama_token> tokens) {
+    void add_tokens(TokenVec &tokens) { add_tokens(tokens.tokens); }
+
+    void add_tokens(const std::vector<llama_token> &tokens) {
         for (auto tok : tokens) {
             embd.push_back(tok);
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
@@ -623,29 +699,6 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (params.embedding) {
-        printf("\n************\n");
-        printf(
-            "%s: please use the 'embedding' tool for embedding calculations\n",
-            __func__);
-        printf("************\n\n");
-
-        return 0;
-    }
-
-    if (params.rope_freq_base != 10000.0) {
-        fprintf(stderr,
-                "%s: warning: changing RoPE frequency base to %g (default "
-                "10000.0)\n",
-                __func__, params.rope_freq_base);
-    }
-
-    if (params.rope_freq_scale != 1.0) {
-        fprintf(stderr,
-                "%s: warning: scaling RoPE frequency by %g (default 1.0)\n",
-                __func__, params.rope_freq_scale);
-    }
-
     fprintf(stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER,
             BUILD_COMMIT);
 
@@ -821,25 +874,6 @@ int main(int argc, char **argv) {
                     return 1;
                 }
 
-                //                if (params.verbose_prompt) {
-                //                    fprintf(stderr, "\n");
-                //                    fprintf(stderr, "%s: prompt: '%s'\n",
-                //                    __func__,
-                //                            params.prompt.c_str());
-                //                    fprintf(stderr, "%s: number of tokens in
-                //                    prompt = %zu\n",
-                //                            __func__, embd_inp.size());
-                //                    for (int i = 0; i < (int)embd_inp.size();
-                //                    i++) {
-                //                        fprintf(stderr, "%6d -> '%s'\n",
-                //                        embd_inp[i],
-                //                                llama_token_to_piece(ctx,
-                //                                embd_inp[i]).c_str());
-                //                    }
-                //
-                //                    fprintf(stderr, "\n");
-                //                }
-
                 if (first) {
                     fprintf(stderr, "sampling: \n%s\n",
                             llama_sampling_print(sparams).c_str());
@@ -854,23 +888,28 @@ int main(int argc, char **argv) {
                     //   ],
                     //   "messages": [
                     //       {"msg":"<C> *<CHAR> sits in a library*"},
-                    //       {"msg":"<U> Hey <CHAR> *waves* I heard you had birthday, how old did you get?"},
+                    //       {"msg":"<U> Hey <CHAR> *waves* I heard you had
+                    //       birthday, how old did you get?"},
                     //       {"msg":"<C> Hi <USER>, yes I got",
                     //        "query_id": "age"
                     //        "msg_postfix": "years old.",
-                    //        "complete": { "n_gen": 10, "bnf": "\" \"? [1-9][0-9]*" },
+                    //        "complete": { "n_gen": 10, "bnf": "\" \"?
+                    //        [1-9][0-9]*" },
                     //       },
-                    //       {"msg":"<U> Amazing! You got new clothes I see, what are you wearing?"},
+                    //       {"msg":"<U> Amazing! You got new clothes I see,
+                    //       what are you wearing?"},
                     //       {"msg":"<C> Right now I am wearing",
                     //        "query_id": "clothes"
                     //        "msg_postfix": ".",
-                    //        "complete": { "n_gen": 10, "top-k": 10, "dfs": true }
+                    //        "complete": { "n_gen": 10, "top-k": 10, "dfs":
+                    //        true }
                     //       },
                     //   ],
                     // }
                     //
-                    // "age" would result in a multiplied probability of the resulting answer.
-                    // "clothes" would be a list of answers, each with their multiplied probabilty.
+                    // "age" would result in a multiplied probability of the
+                    // resulting answer. "clothes" would be a list of answers,
+                    // each with their multiplied probabilty.
 
                 } else if (prompt_test.find("chat") != prompt_test.end()) {
                     // "chat": {
