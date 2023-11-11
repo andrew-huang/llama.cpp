@@ -51,6 +51,16 @@ static size_t benchmark_start_time;
 
 const char *ws = "\n\r";
 
+std::string concatl(const std::vector<std::string> &l);
+
+std::string concatl(const std::vector<std::string> &l) {
+    std::string logstr;
+    for (auto logentry : l) {
+        logstr += logentry;
+    }
+    return logstr;
+}
+
 // trim from end of string (right)
 inline std::string &rtrim_nl(std::string &s, const char *t = ws) {
     s.erase(s.find_last_not_of(t) + 1);
@@ -214,6 +224,22 @@ json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
     return single_response;
 }
 
+std::string trim_generated_chat_response(std::string gen);
+
+std::string trim_generated_chat_response(std::string gen) {
+    gen = std::regex_replace(gen, std::regex("\n\n\n*", std::regex::extended),
+                             "\n");
+    gen = std::regex_replace(
+        gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
+    gen = std::regex_replace(
+        gen, std::regex("\\*\\*\\**", std::regex::extended), "");
+    gen = std::regex_replace(
+        gen, std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*", std::regex::extended),
+        "$1");
+    rtrim_nl(gen);
+    return gen;
+}
+
 struct TextReplacer {
     json prompt_runner_conf;
     json extra_replacements;
@@ -272,8 +298,17 @@ struct TokenVec {
 
     TokenVec() : p0(0), p1(0), decoded(false) {}
     TokenVec(const std::string &prompt) : p0(0), p1(0), decoded(false) {
-        const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
-        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
+        load_as_mid(prompt);
+    }
+
+    TokenVec spawn_continuation() {
+        TokenVec tv;
+        if (tokens.size() > 0) {
+            tv.tokens.push_back(tokens.back());
+        }
+        tv.p0 = p1;
+        tv.p1 = p1;
+        return tv;
     }
 
     void append(llama_token id) { tokens.push_back(id); }
@@ -312,11 +347,104 @@ struct TokenVec {
         return 0;
     }
 
-    void load_mid_piece_from(const std::string &prompt) {
+    void load_as_bos(const std::string &prompt) {
+        const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
+        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
+        printf("TOKENIZE BOS[%s]\n", prompt.c_str());
+    }
+
+    void load_as_mid(const std::string &prompt) {
         tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), false, true);
+        printf("TOKENIZE MID[%s]\n", prompt.c_str());
     }
 
     size_t size() { return tokens.size(); }
+};
+
+struct StopSequences {
+    json stop_sequences;
+
+    void set_stop_sequences(json ss) { stop_sequences = ss; }
+
+    bool trim_stop_sequence(const std::string &input, std::string &trimmed) {
+        for (const auto &matched : stop_sequences) {
+            size_t stop_pos = input.find(matched);
+            if (stop_pos != std::string::npos) {
+                trimmed = input.substr(0, stop_pos);
+                return true;
+            }
+        }
+
+        trimmed = input;
+
+        return false;
+    }
+};
+
+struct Conversation {
+    TextReplacer replacer;
+    StopSequences stop_seq;
+    std::string char_log_fmt;
+    std::string user_log_fmt;
+
+    std::string char_prompt;
+    std::string user_prompt;
+
+    json char_cfg;
+    json user_cfg;
+
+    std::vector<std::string> chatlog;
+
+    json test_replacements;
+
+    Conversation(TextReplacer repl, StopSequences ss, json test_replacement)
+        : replacer(repl), stop_seq(ss), test_replacements(test_replacement) {}
+
+    bool load_config(json chat) {
+        if (chat.contains("user")) {
+            user_cfg = chat["user"];
+        } else {
+            fprintf(stderr, "BAD CHAT, NO \"user\" KEY!\n");
+            return false;
+        }
+
+        if (chat.contains("char")) {
+            char_cfg = chat["char"];
+        } else {
+            fprintf(stderr, "BAD CHAT, NO \"user\" KEY!\n");
+            return false;
+        }
+        printf("FOFO\n");
+
+        user_prompt = replacer.apply_replacements(test_replacements,
+                                                  user_cfg.value("prompt", ""));
+        char_prompt = replacer.apply_replacements(test_replacements,
+                                                  char_cfg.value("prompt", ""));
+        printf("FOFO %s\n", user_prompt.c_str());
+
+        std::string char_log_init = chat.value("char_log_init", "");
+        printf("FOFO\n");
+        if (char_log_init.size() > 0) {
+            replacer.add_extra("<RESPONSE>", char_log_init);
+            std::string entry = char_cfg.value("log_fmt", "<RESPONSE>");
+            entry = replacer.apply_replacements(test_replacements, entry);
+            chatlog.push_back(entry);
+        }
+
+        return true;
+    }
+
+    void append_raw_chat_response(const std::string &leader_prompt,
+                                  const std::string &resp) {
+        std::string cleaned;
+        stop_seq.trim_stop_sequence(resp, cleaned);
+        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
+        cleaned = trim_generated_chat_response(cleaned);
+        chatlog.push_back(leader_prompt + cleaned);
+        printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
+    }
+
+    std::string chatlog_text() { return concatl(chatlog); }
 };
 
 struct Decoder {
@@ -326,22 +454,61 @@ struct Decoder {
         ctx_sampling = llama_sampling_init(sparams);
     }
 
+    void reset_seed(int seed) { llama_set_rng_seed(*g_ctx, seed); }
+
+    void refeed_tokens_for_sampling(TokenVec &tokens) {
+        printf("REFEED[p0=%d,p1=%d,size=%d][%s]\n", tokens.p0, tokens.p1,
+               tokens.size(), tokens.to_string().c_str());
+        llama_sampling_reset(ctx_sampling);
+        for (auto tok : tokens.tokens) {
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+        }
+    }
+
     llama_token sample(int idx) {
         const llama_token id =
             llama_sampling_sample(ctx_sampling, *g_ctx, NULL, idx);
         return id;
     }
 
+    bool decode_to_cache(TokenVec &tokens, llama_pos p0, llama_seq_id seq_id) {
+        llama_batch batch;
+
+        batch = llama_batch_init(tokens.size(), 0, 1);
+        int i = 0;
+        // tokens.print();
+        printf("### batch seq_id=%d, p0=%d to p1=%ld\n", seq_id, p0,
+               p0 + tokens.size());
+        for (auto tok : tokens.tokens) {
+            llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+            i++;
+        }
+
+        bool ok = false;
+        if (llama_decode(*g_ctx, batch) != 0) {
+            LOG_TEE("%s: llama_decode() failed\n", __func__);
+            ok = false;
+        } else {
+            tokens.p0 = p0;
+            tokens.p1 = p0 + i;
+            ok = true;
+        }
+
+        llama_batch_free(batch);
+
+        return ok;
+    }
+
     bool decode(TokenVec &tokens, bool only_last_token, llama_pos p0,
-                llama_seq_id seq_id, bool for_output) {
+                llama_seq_id seq_id) {
         llama_batch batch;
 
         if (only_last_token) {
             batch = llama_batch_init(1, 0, 1);
-            printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
-                   for_output ? 1 : 0);
-            // tokens.print_last();
-            llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, false);
+            //d// printf("### batch seq_id=%d, p0=%d\n", seq_id, p0);
+            //d// tokens.print_last();
+            llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, true);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
                                   true);
             tokens.p0 = p0;
@@ -351,20 +518,17 @@ struct Decoder {
             batch = llama_batch_init(tokens.size(), 0, 1);
             int i = 0;
             //            tokens.print();
-            printf("### batch seq_id=%d, p0=%d to p1=%ld (out=%d)\n", seq_id,
-                   p0, p0 + tokens.size(), for_output ? 1 : 0);
+            // printf("### batch seq_id=%d, p0=%d to p1=%ld\n", seq_id,
+            //        p0, p0 + tokens.size());
             for (auto tok : tokens.tokens) {
                 llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
                 llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
                 i++;
             }
+            batch.logits[batch.n_tokens - 1] = true;
 
             tokens.p0 = p0;
             tokens.p1 = p0 + i;
-        }
-
-        if (for_output) {
-            batch.logits[batch.n_tokens - 1] = true;
         }
 
         bool ok = false;
@@ -374,9 +538,7 @@ struct Decoder {
             tokens.decoded = true;
             ok = true;
 
-            if (for_output) {
-                tokens.append(sample(batch.n_tokens - 1));
-            }
+            tokens.append(sample(batch.n_tokens - 1));
         }
 
         llama_batch_free(batch);
@@ -392,13 +554,16 @@ struct SystemPrompt {
     llama_seq_id seq_id;
     TokenVec tokens;
 
-    SystemPrompt(const std::string &prompt) : tokens(prompt), p0(0) {
+    SystemPrompt(const std::string &prompt) : p0(0) {
         seq_id = prompt_piece_seq_id++;
+        tokens.load_as_bos(prompt);
     }
 
     bool decode(Decoder &decoder) {
-        return decoder.decode(tokens, false, p0, seq_id, false);
+        return decoder.decode_to_cache(tokens, p0, seq_id);
     }
+
+    std::string to_string() { return tokens.to_string(); }
 
     llama_pos get_p1() { return tokens.p1; }
 };
@@ -411,7 +576,7 @@ struct PromptPiece {
     void load_as_mid(const std::string &prompt) {
         p0 = 0;
         seq_id = 0;
-        tokens.load_mid_piece_from(prompt);
+        tokens.load_as_mid(prompt);
     }
 
     llama_pos get_p0() { return tokens.p0; }
@@ -430,64 +595,87 @@ struct PromptPiece {
         p0 = tokens.p0;
     }
 
-    bool initial_decode(Decoder &decoder, llama_pos p0, llama_seq_id sid,
-                        int n_tokens) {
-        seq_id = sid;
-
-        if (!decoder.decode(tokens, false, p0, seq_id, n_tokens > 0)) {
+    bool append(Decoder &decoder, TokenVec &new_tokens) {
+        if (!decoder.decode_to_cache(new_tokens, tokens.p1, seq_id)) {
             return false;
         }
-        if (n_tokens == 0) {
-            return true;
-        }
+        printf("appended tokens p0=%d, p1=%d\n", new_tokens.p0, new_tokens.p1);
 
-        n_tokens--;
+        tokens.append(new_tokens);
 
-        while (n_tokens > 0) {
-            if (!decoder.decode(tokens, true, tokens.p1, seq_id, true)) {
-                return false;
-            }
+        return true;
+    }
 
-            n_tokens--;
+    bool decode_to_cache(Decoder &decoder, llama_pos p0, llama_seq_id sid) {
+        seq_id = sid;
+
+        if (!decoder.decode_to_cache(tokens, p0, seq_id)) {
+            return false;
         }
 
         return true;
     }
 
-    bool complete_and_rewind(Decoder &decoder, const std::string &next_piece,
-                             int n_tokens, std::string &output) {
-        TokenVec new_tokens(next_piece);
+    bool complete(Decoder &decoder, StopSequences &stop_seq,
+                  const std::string &next_piece, int n_tokens,
+                  std::string &output) {
+        int pre_usage = llama_kv_cache_usage(**g_ctx);
 
-        int pre_usage1 = llama_kv_cache_usage(**g_ctx);
-        printf("START! [%s]\n", new_tokens.to_string().c_str());
-        if (!decoder.decode(new_tokens, false, tokens.p1, seq_id, true)) {
+        decoder.refeed_tokens_for_sampling(tokens);
+
+        TokenVec leader_tokens(next_piece);
+
+        //  printf("START! [%s]\n", leader_tokens.to_string().c_str());
+        if (!decoder.decode(leader_tokens, false, tokens.p1, seq_id)) {
             return false;
         }
+        printf("LEADER[p0=%d,p1=%d,size=%d][%s]\n", leader_tokens.p0,
+               leader_tokens.p1, leader_tokens.size(),
+               leader_tokens.to_string().c_str());
 
-        printf("MID! [%s]\n", new_tokens.to_string().c_str());
+        TokenVec new_tokens = leader_tokens.spawn_continuation();
+        printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0, new_tokens.p1,
+               new_tokens.to_string().c_str());
+
+        // printf("MID! [%s]\n", new_tokens.to_string().c_str());
         while (n_tokens > 0) {
-            if (new_tokens.tokens.back() == llama_token_eos(*g_model)) {
+            if (new_tokens.size() > 0 &&
+                new_tokens.tokens.back() == llama_token_eos(*g_model)) {
                 printf("got EOS\n");
                 break;
             }
 
-            if (!decoder.decode(new_tokens, true, new_tokens.p1, seq_id,
-                                true)) {
+            std::string generated = new_tokens.to_string();
+            std::string _out;
+            if (stop_seq.trim_stop_sequence(generated, _out)) {
+                printf("got STOPSEQ\n");
+                break;
+            }
+
+            if (!decoder.decode(new_tokens, true, new_tokens.p1, seq_id)) {
+                printf("ERROR?!?\n");
                 return false;
             }
 
             n_tokens--;
         }
 
-        int pre_usage = llama_kv_cache_usage(**g_ctx);
+        // int pre_usage = llama_kv_cache_usage(**g_ctx);
 
         output = new_tokens.to_string();
+        printf("SETOUT:[%s]\n", output.c_str());
 
-        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p1, tokens.p1 + new_tokens.size());
+        // tokens.p0 is the beginning of the completion, including the leading
+        // prompt new_tokens.p1 is the end of the generated tokens, pointing
+        // towards the next token.
+        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p0, new_tokens.p1);
 
         int post_usage = llama_kv_cache_usage(**g_ctx);
-        printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 + new_tokens.size(), pre_usage1, pre_usage, post_usage,
-               output.c_str());
+        printf("PREPOST DIFF=%d\n", pre_usage - post_usage);
+        assert(pre_usage == post_usage);
+        //  printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 +
+        //  new_tokens.size(), pre_usage1, pre_usage, post_usage,
+        //         output.c_str());
 
         return true;
     }
@@ -512,13 +700,7 @@ struct DualPrefixPrompt {
 
         int p1 = prefix1.get_p1();
         is_at_prefix1 = true;
-        return mid_piece.initial_decode(decoder, p1, prefix1.seq_id, 0);
-
-        // - Decode prefix1, no token completion
-        // - Decode prefix2, no token completion
-        // - Decode first continuation from the mid piece as if belonging to
-        //   prefix1. And start n_token tokens completion into the sequence of
-        //   the mid piece.
+        return mid_piece.decode_to_cache(decoder, p1, prefix1.seq_id);
     }
 
     void use_prefix1() {
@@ -536,14 +718,15 @@ struct DualPrefixPrompt {
     }
 
     bool feed_mid_piece(Decoder &decoder, const std::string &mid) {
-        // tokenize mid
-        // append to mid without generating new tokens
+        TokenVec new_tokens(mid);
+        return mid_piece.append(decoder, new_tokens);
     }
 
-    bool complete_and_rewind(Decoder &decoder, const std::string &add_prompt,
-                             int n_tokens, std::string &output) {
-        return mid_piece.complete_and_rewind(decoder, add_prompt, n_tokens,
-                                             output);
+    bool complete(Decoder &decoder, StopSequences &stop_seq,
+                  const std::string &add_prompt, int n_tokens,
+                  std::string &output) {
+        return mid_piece.complete(decoder, stop_seq, add_prompt, n_tokens,
+                                  output);
     }
 };
 
@@ -868,16 +1051,6 @@ bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
     return false;
 }
 
-std::string concatl(const std::vector<std::string> &l);
-
-std::string concatl(const std::vector<std::string> &l) {
-    std::string logstr;
-    for (auto logentry : l) {
-        logstr += logentry;
-    }
-    return logstr;
-}
-
 int main(int argc, char **argv) {
     gpt_params params;
 
@@ -1135,73 +1308,67 @@ int main(int argc, char **argv) {
                     //   "char_log_init": "Arias character and scenario
                     //   described here.", "turns": 50
                     // },
-                    json chat = prompt_test["chat"];
 
-                    json user_prompt;
-                    if (chat.contains("user")) {
-                        user_prompt = chat["user"];
-                    } else {
-                        fprintf(stderr, "BAD CHAT, NO \"user\" KEY!\n");
-                        return 1;
+                    StopSequences stop_seq;
+                    if (prompt_runner_conf.find("stop_sequences") !=
+                        prompt_runner_conf.end()) {
+                        stop_seq.set_stop_sequences(
+                            prompt_runner_conf["stop_sequences"]);
                     }
 
-                    json char_prompt;
-                    if (chat.contains("char")) {
-                        char_prompt = chat["char"];
-                    } else {
-                        fprintf(stderr, "BAD CHAT, NO \"user\" KEY!\n");
-                        return 1;
-                    }
+                    Conversation conversation(replacer, stop_seq, prompt_test);
+                    conversation.load_config(prompt_test["chat"]);
 
-                    std::string user_prompt_txt = replacer.apply_replacements(
-                        prompt_test, user_prompt.value("prompt", ""));
-                    std::string char_prompt_txt = replacer.apply_replacements(
-                        prompt_test, char_prompt.value("prompt", ""));
-
-                    std::vector<std::string> chatlog;
-
-                    std::string char_log_init = chat.value("char_log_init", "");
-                    if (char_log_init.size() > 0) {
-                        replacer.add_extra("<RESPONSE>", char_log_init);
-                        std::string log_fmt =
-                            char_prompt.value("log_fmt", "<RESPONSE>");
-                        char_log_init =
-                            replacer.apply_replacements(prompt_test, log_fmt);
-                        chatlog.push_back(char_log_init);
-                    }
-
-                    DualPrefixPrompt dpp(char_prompt_txt, user_prompt_txt);
+                    DualPrefixPrompt dpp(conversation.user_prompt,
+                                         conversation.char_prompt);
 
                     Decoder decoder(sparams);
-                    std::string logstr = concatl(chatlog);
-                    dpp.set_mid_piece(logstr);
+                    dpp.set_mid_piece(conversation.chatlog_text());
                     dpp.init_decode(decoder);
 
-                    dpp.use_prefix1();
+                    printf("MID[%s]\n",
+                           dpp.mid_piece.tokens.to_string().c_str());
+
+                    dpp.use_prefix2();
                     std::string out;
-                    dpp.complete_and_rewind(decoder, "\nLoki: ", 70, out);
-                    dpp.complete_and_rewind(decoder, "\nLoki: ", 70, out);
 
+                    for (int k = 0; k < 2; k++) {
+                        decoder.reset_seed(seed_value);
+                        dpp.complete(decoder, stop_seq, "Loki:", 70, out);
+                        conversation.append_raw_chat_response("Loki:", out);
+                    }
 
-//                    for (int i = 0; i < 100; i++) {
-//                        if (i % 2 == 0) {
-//                            if (i > 0) {
-//                                dpp.swap_prefix_and_complete(decoder,
-//                                                             "\nLoki: ", 70);
-//                            } else {
-//                                dpp.swap_prefix_and_complete(decoder,
-//                                                             "Loki: ", 70);
-//                            }
-//                        } else {
-//                            if (i > 1) {
-//                                dpp.swap_prefix_and_complete(decoder,
-//                                                             "\nAria: ", 70);
-//                            } else {
-//                                dpp.swap_prefix_and_complete(decoder,
-//                                                             "Aria: ", 70);
-//                            }
-//                        }
-//                    }
+                    //                    dpp.complete(decoder, stop_seq,
+                    //                    "Loki:", 70, out);
+                    //
+                    //                    printf("OUTPUT[%s]\n", out.c_str());
+                    //                    decoder.reset_seed(seed_value);
+                    //
+                    //                    printf("### rewinding kv cache...\n");
+                    //
+                    //                    dpp.complete(decoder, stop_seq,
+                    //                    "Loki:", 70, out);
+                    //                    printf("OUTPUT[%s]\n", out.c_str());
+                    //
+                    //                    for (int i = 0; i < 100; i++) {
+                    //                        if (i % 2 == 0) {
+                    //                            if (i > 0) {
+                    //                                dpp.swap_prefix_and_complete(decoder,
+                    //                                                             "\nLoki: ", 70);
+                    //                            } else {
+                    //                                dpp.swap_prefix_and_complete(decoder,
+                    //                                                             "Loki: ", 70);
+                    //                            }
+                    //                        } else {
+                    //                            if (i > 1) {
+                    //                                dpp.swap_prefix_and_complete(decoder,
+                    //                                                             "\nAria: ", 70);
+                    //                            } else {
+                    //                                dpp.swap_prefix_and_complete(decoder,
+                    //                                                             "Aria: ", 70);
+                    //                            }
+                    //                        }
+                    //                    }
 
                     //                    int chat_turns = chat.value("turns",
                     //                    3);
