@@ -1458,7 +1458,7 @@ static bool llama_kv_cache_find_slot(
 }
 
 // find how many cells are currently in use
-static int32_t llama_kv_cache_cell_max(const struct llama_kv_cache & cache) {
+int32_t llama_kv_cache_cell_max(const struct llama_kv_cache & cache) {
     for (uint32_t i = cache.size - 1; i > 0; --i) {
         if (cache.cells[i].pos >= 0 && !cache.cells[i].seq_id.empty()) {
             return i + 1;
@@ -1467,6 +1467,12 @@ static int32_t llama_kv_cache_cell_max(const struct llama_kv_cache & cache) {
 
     return 0;
 }
+
+int32_t llama_kv_cache_usage(llama_context & lctx) {
+    auto & kv_self = lctx.kv_self;
+    return llama_kv_cache_cell_max(kv_self);
+}
+
 
 static void llama_kv_cache_tokens_rm(struct llama_kv_cache & cache, int32_t c0, int32_t c1) {
     if (c0 < 0) c0 = 0;

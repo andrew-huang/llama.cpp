@@ -338,8 +338,8 @@ struct Decoder {
 
         if (only_last_token) {
             batch = llama_batch_init(1, 0, 1);
-             printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
-                    for_output ? 1 : 0);
+            printf("### batch seq_id=%d, p0=%d (out=%d)\n", seq_id, p0,
+                   for_output ? 1 : 0);
             // tokens.print_last();
             llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, false);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
@@ -350,7 +350,7 @@ struct Decoder {
         } else {
             batch = llama_batch_init(tokens.size(), 0, 1);
             int i = 0;
-//            tokens.print();
+            //            tokens.print();
             printf("### batch seq_id=%d, p0=%d to p1=%ld (out=%d)\n", seq_id,
                    p0, p0 + tokens.size(), for_output ? 1 : 0);
             for (auto tok : tokens.tokens) {
@@ -454,10 +454,11 @@ struct PromptPiece {
         return true;
     }
 
-    bool complete(Decoder &decoder, const std::string &next_piece,
-                  int n_tokens) {
+    bool complete_and_rewind(Decoder &decoder, const std::string &next_piece,
+                             int n_tokens, std::string &output) {
         TokenVec new_tokens(next_piece);
 
+        int pre_usage1 = llama_kv_cache_usage(**g_ctx);
         printf("START! [%s]\n", new_tokens.to_string().c_str());
         if (!decoder.decode(new_tokens, false, tokens.p1, seq_id, true)) {
             return false;
@@ -478,10 +479,15 @@ struct PromptPiece {
             n_tokens--;
         }
 
-        std::string new_seq = new_tokens.to_string();
-        printf("APPENDING! [%s]\n", new_seq.c_str());
-        tokens.append(new_tokens);
-        tokens.print();
+        int pre_usage = llama_kv_cache_usage(**g_ctx);
+
+        output = new_tokens.to_string();
+
+        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p1, tokens.p1 + new_tokens.size());
+
+        int post_usage = llama_kv_cache_usage(**g_ctx);
+        printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 + new_tokens.size(), pre_usage1, pre_usage, post_usage,
+               output.c_str());
 
         return true;
     }
@@ -505,6 +511,7 @@ struct DualPrefixPrompt {
         if (!prefix2.decode(decoder)) return false;
 
         int p1 = prefix1.get_p1();
+        is_at_prefix1 = true;
         return mid_piece.initial_decode(decoder, p1, prefix1.seq_id, 0);
 
         // - Decode prefix1, no token completion
@@ -514,22 +521,29 @@ struct DualPrefixPrompt {
         //   the mid piece.
     }
 
-    bool swap_prefix_and_complete(Decoder &decoder,
-                                  const std::string &add_prompt, int n_tokens) {
-        is_at_prefix1 = !is_at_prefix1;
+    void use_prefix1() {
+        if (!is_at_prefix1) {
+            mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
+            is_at_prefix1 = true;
+        }
+    }
 
+    void use_prefix2() {
         if (is_at_prefix1) {
             mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
-        } else {
-            mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
+            is_at_prefix1 = false;
         }
+    }
 
-        return mid_piece.complete(decoder, add_prompt, n_tokens);
+    bool feed_mid_piece(Decoder &decoder, const std::string &mid) {
+        // tokenize mid
+        // append to mid without generating new tokens
+    }
 
-        // - Copy the prefix2 into the new sequence
-        // - Shift the mid_piece to the end of prefix2
-        // - Decode and Append add_prompt to the end of mid_piece
-        // - Complete n_tokens into the mid_piece
+    bool complete_and_rewind(Decoder &decoder, const std::string &add_prompt,
+                             int n_tokens, std::string &output) {
+        return mid_piece.complete_and_rewind(decoder, add_prompt, n_tokens,
+                                             output);
     }
 };
 
@@ -1162,21 +1176,32 @@ int main(int argc, char **argv) {
                     std::string logstr = concatl(chatlog);
                     dpp.set_mid_piece(logstr);
                     dpp.init_decode(decoder);
-                    for (int i = 0; i < 100; i++) {
-                        if (i % 2 == 0) {
-                            if (i > 0) {
-                                dpp.swap_prefix_and_complete(decoder, "\nLoki: ", 70);
-                            } else {
-                                dpp.swap_prefix_and_complete(decoder, "Loki: ", 70);
-                            }
-                        } else {
-                            if (i > 1) {
-                                dpp.swap_prefix_and_complete(decoder, "\nAria: ", 70);
-                            } else {
-                                dpp.swap_prefix_and_complete(decoder, "Aria: ", 70);
-                            }
-                        }
-                    }
+
+                    dpp.use_prefix1();
+                    std::string out;
+                    dpp.complete_and_rewind(decoder, "\nLoki: ", 70, out);
+                    dpp.complete_and_rewind(decoder, "\nLoki: ", 70, out);
+
+
+//                    for (int i = 0; i < 100; i++) {
+//                        if (i % 2 == 0) {
+//                            if (i > 0) {
+//                                dpp.swap_prefix_and_complete(decoder,
+//                                                             "\nLoki: ", 70);
+//                            } else {
+//                                dpp.swap_prefix_and_complete(decoder,
+//                                                             "Loki: ", 70);
+//                            }
+//                        } else {
+//                            if (i > 1) {
+//                                dpp.swap_prefix_and_complete(decoder,
+//                                                             "\nAria: ", 70);
+//                            } else {
+//                                dpp.swap_prefix_and_complete(decoder,
+//                                                             "Aria: ", 70);
+//                            }
+//                        }
+//                    }
 
                     //                    int chat_turns = chat.value("turns",
                     //                    3);
