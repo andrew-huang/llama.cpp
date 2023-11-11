@@ -454,10 +454,13 @@ struct Decoder {
         ctx_sampling = llama_sampling_init(sparams);
     }
 
-    void reset_seed(int seed) { llama_set_rng_seed(*g_ctx, seed); }
+    void reset_seed(int seed) {
+        printf("RESET SEED %d\n", seed);
+        llama_set_rng_seed(*g_ctx, seed);
+    }
 
     void refeed_tokens_for_sampling(TokenVec &tokens) {
-        printf("REFEED[p0=%d,p1=%d,size=%d][%s]\n", tokens.p0, tokens.p1,
+        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0, tokens.p1,
                tokens.size(), tokens.to_string().c_str());
         llama_sampling_reset(ctx_sampling);
         for (auto tok : tokens.tokens) {
@@ -466,6 +469,7 @@ struct Decoder {
     }
 
     llama_token sample(int idx) {
+        // printf("SAMPLE IDX=%d\n", idx);
         const llama_token id =
             llama_sampling_sample(ctx_sampling, *g_ctx, NULL, idx);
         return id;
@@ -506,8 +510,8 @@ struct Decoder {
 
         if (only_last_token) {
             batch = llama_batch_init(1, 0, 1);
-            //d// printf("### batch seq_id=%d, p0=%d\n", seq_id, p0);
-            //d// tokens.print_last();
+            // d// printf("### batch seq_id=%d, p0=%d\n", seq_id, p0);
+            // d// tokens.print_last();
             llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, true);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
                                   true);
@@ -629,16 +633,16 @@ struct PromptPiece {
         if (!decoder.decode(leader_tokens, false, tokens.p1, seq_id)) {
             return false;
         }
-        printf("LEADER[p0=%d,p1=%d,size=%d][%s]\n", leader_tokens.p0,
+        printf("LEADER[p0=%d,p1=%d,size=%ld][%s]\n", leader_tokens.p0,
                leader_tokens.p1, leader_tokens.size(),
                leader_tokens.to_string().c_str());
 
         TokenVec new_tokens = leader_tokens.spawn_continuation();
-        printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0, new_tokens.p1,
-               new_tokens.to_string().c_str());
 
         // printf("MID! [%s]\n", new_tokens.to_string().c_str());
         while (n_tokens > 0) {
+            printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0, new_tokens.p1,
+                   new_tokens.to_string().c_str());
             if (new_tokens.size() > 0 &&
                 new_tokens.tokens.back() == llama_token_eos(*g_model)) {
                 printf("got EOS\n");
@@ -668,10 +672,10 @@ struct PromptPiece {
         // tokens.p0 is the beginning of the completion, including the leading
         // prompt new_tokens.p1 is the end of the generated tokens, pointing
         // towards the next token.
-        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p0, new_tokens.p1);
+        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p0, new_tokens.p1 + 1);
 
         int post_usage = llama_kv_cache_usage(**g_ctx);
-        printf("PREPOST DIFF=%d\n", pre_usage - post_usage);
+        printf("PREPOST DIFF=%d (%d)\n", pre_usage - post_usage, pre_usage);
         assert(pre_usage == post_usage);
         //  printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 +
         //  new_tokens.size(), pre_usage1, pre_usage, post_usage,
@@ -1329,10 +1333,10 @@ int main(int argc, char **argv) {
                     printf("MID[%s]\n",
                            dpp.mid_piece.tokens.to_string().c_str());
 
-                    dpp.use_prefix2();
                     std::string out;
 
                     for (int k = 0; k < 2; k++) {
+                        dpp.use_prefix2();
                         decoder.reset_seed(seed_value);
                         dpp.complete(decoder, stop_seq, "Loki:", 70, out);
                         conversation.append_raw_chat_response("Loki:", out);
