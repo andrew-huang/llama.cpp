@@ -227,12 +227,14 @@ json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
 std::string trim_generated_chat_response(std::string gen);
 
 std::string trim_generated_chat_response(std::string gen) {
+    // Strip extra newlines:
     gen = std::regex_replace(gen, std::regex("\n\n\n*", std::regex::extended),
                              "\n");
-    gen = std::regex_replace(
-        gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
-    gen = std::regex_replace(
-        gen, std::regex("\\*\\*\\**", std::regex::extended), "");
+    // gen = std::regex_replace(
+    //     gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
+    // gen = std::regex_replace(
+    //     gen, std::regex("\\*\\*\\**", std::regex::extended), "");
+    // Strip trailing cutted sentences:
     gen = std::regex_replace(
         gen, std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*", std::regex::extended),
         "$1");
@@ -569,6 +571,9 @@ struct Decoder {
         return ok;
     }
 };
+
+
+
 
 int prompt_piece_seq_id = 0;
 
