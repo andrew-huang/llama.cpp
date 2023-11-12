@@ -350,12 +350,12 @@ struct TokenVec {
     void load_as_bos(const std::string &prompt) {
         const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
         tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
-        printf("TOKENIZE BOS[%s]\n", prompt.c_str());
+        // d// printf("TOKENIZE BOS[%s]\n", prompt.c_str());
     }
 
     void load_as_mid(const std::string &prompt) {
         tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), false, true);
-        printf("TOKENIZE MID[%s]\n", prompt.c_str());
+        // d// printf("TOKENIZE MID[%s]\n", prompt.c_str());
     }
 
     size_t size() { return tokens.size(); }
@@ -390,6 +390,9 @@ struct Conversation {
     std::string char_prompt;
     std::string user_prompt;
 
+    std::string char_next_fmt;
+    std::string user_next_fmt;
+
     json char_cfg;
     json user_cfg;
 
@@ -420,28 +423,44 @@ struct Conversation {
                                                   user_cfg.value("prompt", ""));
         char_prompt = replacer.apply_replacements(test_replacements,
                                                   char_cfg.value("prompt", ""));
+        user_log_fmt = user_cfg.value("log_fmt", "");
+        char_log_fmt = char_cfg.value("log_fmt", "");
+        user_next_fmt = replacer.apply_replacements(
+            test_replacements, user_cfg.value("next_fmt", ""));
+        char_next_fmt = replacer.apply_replacements(
+            test_replacements, char_cfg.value("next_fmt", ""));
         printf("FOFO %s\n", user_prompt.c_str());
 
         std::string char_log_init = chat.value("char_log_init", "");
         printf("FOFO\n");
         if (char_log_init.size() > 0) {
             replacer.add_extra("<RESPONSE>", char_log_init);
-            std::string entry = char_cfg.value("log_fmt", "<RESPONSE>");
-            entry = replacer.apply_replacements(test_replacements, entry);
+            std::string entry =
+                replacer.apply_replacements(test_replacements, char_log_fmt);
             chatlog.push_back(entry);
         }
 
         return true;
     }
 
-    void append_raw_chat_response(const std::string &leader_prompt,
-                                  const std::string &resp) {
+    std::string next_completion_fmt(bool is_user) {
+        return is_user ? user_next_fmt : char_next_fmt;
+    }
+
+    std::string append_raw_chat_response(bool is_user,
+                                         const std::string &resp) {
         std::string cleaned;
         stop_seq.trim_stop_sequence(resp, cleaned);
         //        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
         cleaned = trim_generated_chat_response(cleaned);
-        chatlog.push_back(leader_prompt + cleaned);
+
+        trim_nl(cleaned, " \r\n");
+        replacer.add_extra("<RESPONSE>", cleaned);
+        std::string entry = replacer.apply_replacements(
+            test_replacements, is_user ? user_log_fmt : char_log_fmt);
+        chatlog.push_back(entry);
         printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
+        return entry;
     }
 
     std::string chatlog_text() { return concatl(chatlog); }
@@ -460,9 +479,8 @@ struct Decoder {
     }
 
     void refeed_tokens_for_sampling(TokenVec &tokens) {
-        //        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0,
-        //        tokens.p1,
-        //               tokens.size(), tokens.to_string().c_str());
+        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0, tokens.p1,
+               tokens.size(), tokens.to_string().c_str());
         llama_sampling_reset(ctx_sampling);
         for (auto tok : tokens.tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
@@ -712,6 +730,8 @@ struct DualPrefixPrompt {
     }
 
     void use_prefix1() {
+        printf("USE PREFIX1(p1=%d)[%s]\n", prefix1.get_p1(),
+               prefix1.tokens.to_string().c_str());
         if (!is_at_prefix1) {
             mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
             is_at_prefix1 = true;
@@ -719,6 +739,8 @@ struct DualPrefixPrompt {
     }
 
     void use_prefix2() {
+        printf("USE PREFIX2(p1=%d)[%s]\n", prefix2.get_p1(),
+               prefix2.tokens.to_string().c_str());
         if (is_at_prefix1) {
             mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
             is_at_prefix1 = false;
@@ -1340,10 +1362,23 @@ int main(int argc, char **argv) {
                     std::string out;
 
                     for (int k = 0; k < 6; k++) {
-                        dpp.use_prefix2();
+                        printf("#########################################################################\n");
+                        printf("#####%7d ############################################################\n", k);
+                        printf("#########################################################################\n");
+                        bool is_user = k % 2 == 0;
+                        if (is_user) {
+                            dpp.use_prefix1();
+                        } else {
+                            dpp.use_prefix2();
+                        }
+
                         decoder.reset_seed(seed_value);
-                        dpp.complete(decoder, stop_seq, "Loki:", 70, out);
-                        conversation.append_raw_chat_response("Loki:", out);
+                        dpp.complete(decoder, stop_seq,
+                                     conversation.next_completion_fmt(is_user),
+                                     70, out);
+                        std::string log_entry =
+                            conversation.append_raw_chat_response(is_user, out);
+                        dpp.feed_mid_piece(decoder, log_entry);
                     }
 
                     //                    dpp.complete(decoder, stop_seq,
