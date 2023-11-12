@@ -438,7 +438,7 @@ struct Conversation {
                                   const std::string &resp) {
         std::string cleaned;
         stop_seq.trim_stop_sequence(resp, cleaned);
-        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
+        //        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
         cleaned = trim_generated_chat_response(cleaned);
         chatlog.push_back(leader_prompt + cleaned);
         printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
@@ -455,13 +455,14 @@ struct Decoder {
     }
 
     void reset_seed(int seed) {
-        printf("RESET SEED %d\n", seed);
+        //        printf("RESET SEED %d\n", seed);
         llama_set_rng_seed(*g_ctx, seed);
     }
 
     void refeed_tokens_for_sampling(TokenVec &tokens) {
-        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0, tokens.p1,
-               tokens.size(), tokens.to_string().c_str());
+        //        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0,
+        //        tokens.p1,
+        //               tokens.size(), tokens.to_string().c_str());
         llama_sampling_reset(ctx_sampling);
         for (auto tok : tokens.tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
@@ -641,18 +642,19 @@ struct PromptPiece {
 
         // printf("MID! [%s]\n", new_tokens.to_string().c_str());
         while (n_tokens > 0) {
-            printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0, new_tokens.p1,
-                   new_tokens.to_string().c_str());
+            //            printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0,
+            //            new_tokens.p1,
+            //                   new_tokens.to_string().c_str());
             if (new_tokens.size() > 0 &&
                 new_tokens.tokens.back() == llama_token_eos(*g_model)) {
-                printf("got EOS\n");
+                // printf("got EOS\n");
                 break;
             }
 
             std::string generated = new_tokens.to_string();
             std::string _out;
             if (stop_seq.trim_stop_sequence(generated, _out)) {
-                printf("got STOPSEQ\n");
+                // printf("got STOPSEQ\n");
                 break;
             }
 
@@ -667,15 +669,17 @@ struct PromptPiece {
         // int pre_usage = llama_kv_cache_usage(**g_ctx);
 
         output = new_tokens.to_string();
-        printf("SETOUT:[%s]\n", output.c_str());
+        // printf("SETOUT:[%s]\n", output.c_str());
 
         // tokens.p0 is the beginning of the completion, including the leading
         // prompt new_tokens.p1 is the end of the generated tokens, pointing
         // towards the next token.
-        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p0, new_tokens.p1 + 1);
+        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p1, new_tokens.p1);
 
         int post_usage = llama_kv_cache_usage(**g_ctx);
-        printf("PREPOST DIFF=%d (%d)\n", pre_usage - post_usage, pre_usage);
+        if (post_usage != pre_usage) {
+            printf("PREPOST DIFF=%d (%d)\n", pre_usage - post_usage, pre_usage);
+        }
         assert(pre_usage == post_usage);
         //  printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 +
         //  new_tokens.size(), pre_usage1, pre_usage, post_usage,
@@ -1335,7 +1339,7 @@ int main(int argc, char **argv) {
 
                     std::string out;
 
-                    for (int k = 0; k < 2; k++) {
+                    for (int k = 0; k < 6; k++) {
                         dpp.use_prefix2();
                         decoder.reset_seed(seed_value);
                         dpp.complete(decoder, stop_seq, "Loki:", 70, out);
