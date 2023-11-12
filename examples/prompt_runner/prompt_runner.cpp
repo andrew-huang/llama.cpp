@@ -51,12 +51,18 @@ static size_t benchmark_start_time;
 
 const char *ws = "\n\r";
 
-std::string concatl(const std::vector<std::string> &l);
+std::string concatl(const std::vector<std::string> &l, bool indent = false);
 
-std::string concatl(const std::vector<std::string> &l) {
+std::string concatl(const std::vector<std::string> &l, bool indent) {
     std::string logstr;
     for (auto logentry : l) {
-        logstr += logentry;
+        if (indent) {
+            std::string le = logentry;
+            std::replace(le.begin(), le.end(), '\n', ' ');
+            logstr += "    " + le + "\n";
+        } else {
+            logstr += logentry;
+        }
     }
     return logstr;
 }
@@ -91,6 +97,44 @@ static std::string tokens_to_output_formatted_string(const llama_context *ctx,
     return out;
 }
 
+json sparams_to_json(llama_sampling_params &sp);
+json sparams_to_json(llama_sampling_params &sp) {
+    // clang-format off
+    //    int32_t n_prev            = 64;    // number of previous tokens to remember
+    //    int32_t n_probs           = 0;     // if greater than 0, output the probabilities of top n_probs tokens.
+    //    int32_t top_k             = 40;    // <= 0 to use vocab size
+    //    float   top_p             = 0.95f; // 1.0 = disabled
+    //    float   tfs_z             = 1.00f; // 1.0 = disabled
+    //    float   typical_p         = 1.00f; // 1.0 = disabled
+    //    float   temp              = 0.80f; // 1.0 = disabled
+    //    int32_t penalty_last_n    = 64;    // last n tokens to penalize (0 = disable penalty, -1 = context size)
+    //    float   penalty_repeat    = 1.10f; // 1.0 = disabled
+    //    float   penalty_freq      = 0.00f; // 0.0 = disabled
+    //    float   penalty_present   = 0.00f; // 0.0 = disabled
+    //    int32_t mirostat          = 0;     // 0 = disabled, 1 = mirostat, 2 = mirostat 2.0
+    //    float   mirostat_tau      = 5.00f; // target entropy
+    //    float   mirostat_eta      = 0.10f; // learning rate
+    //    bool    penalize_nl       = true;  // consider newlines as a repeatable token
+    // clang-format on
+
+    json j_params;
+    j_params["top_k"] = sp.top_k;
+    j_params["top_p"] = sp.top_p;
+    j_params["tfs_z"] = sp.tfs_z;
+    j_params["typical_p"] = sp.typical_p;
+    j_params["temp"] = sp.temp;
+    j_params["penalty_present"] = sp.penalty_present;
+    j_params["penalty_freq"] = sp.penalty_freq;
+    j_params["repeat_last_n"] = sp.penalty_last_n;
+    j_params["repeat_penality"] = sp.penalty_repeat;
+    j_params["mirostat"] = sp.mirostat;
+    j_params["mirostat_tau"] = sp.mirostat_tau;
+    j_params["mirostat_eta"] = sp.mirostat_eta;
+    j_params["penalize_nl"] = sp.penalize_nl;
+
+    return j_params;
+}
+
 static std::string now_timestr() {
     auto t = std::time(nullptr);
     auto tm = *std::localtime(&t);
@@ -119,10 +163,12 @@ struct PromptRunContext {
 };
 
 json make_token_respose(std::vector<std::string> &responses,
-                        PromptRunContext &prc, json tokens);
+                        PromptRunContext &prc,
+                        json tokens);
 
 json make_token_respose(std::vector<std::string> &responses,
-                        PromptRunContext &prc, json tokens) {
+                        PromptRunContext &prc,
+                        json tokens) {
     if (prc.cur_test_nr <= 0) prc.cur_test_nr = 1;
 
     int passed_time = time(NULL) - benchmark_start_time;
@@ -151,8 +197,11 @@ json make_token_respose(std::vector<std::string> &responses,
         info_str += buf;
     }
 
-    printf("[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s\n", time_per_test, remaining,
-           passed_time_mins, info_str.c_str());
+    printf("[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s\n",
+           time_per_test,
+           remaining,
+           passed_time_mins,
+           info_str.c_str());
     fflush(stdout);
 
     responses.push_back(prc.test_id + "=" + info_str);
@@ -168,11 +217,17 @@ json make_token_respose(std::vector<std::string> &responses,
     return single_response;
 }
 
-json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt, json prompt);
+json make_response(std::vector<std::string> &responses,
+                   PromptRunContext &prc,
+                   const std::string gen,
+                   int gen_tok_cnt,
+                   json prompt);
 
-json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt, json prompt) {
+json make_response(std::vector<std::string> &responses,
+                   PromptRunContext &prc,
+                   const std::string gen,
+                   int gen_tok_cnt,
+                   json prompt) {
     std::ostringstream oss;
     oss << std::setprecision(1) << prc.temp;
     std::string temp_str = oss.str();
@@ -203,8 +258,12 @@ json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
     std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
     std::replace(print_gen.begin(), print_gen.end(), '\t', '/');
 
-    printf("[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s %s\n", time_per_test,
-           remaining, passed_time_mins, gen_prefix.c_str(), print_gen.c_str());
+    printf("[s/t=%5.2fs, eta=%5.1fm, t=%5.1fm] %s %s\n",
+           time_per_test,
+           remaining,
+           passed_time_mins,
+           gen_prefix.c_str(),
+           print_gen.c_str());
     fflush(stdout);
 
     responses.push_back(gen_prefix + gen);
@@ -228,15 +287,16 @@ std::string trim_generated_chat_response(std::string gen);
 
 std::string trim_generated_chat_response(std::string gen) {
     // Strip extra newlines:
-    gen = std::regex_replace(gen, std::regex("\n\n\n*", std::regex::extended),
-                             "\n");
+    gen = std::regex_replace(
+        gen, std::regex("\n\n\n*", std::regex::extended), "\n");
     // gen = std::regex_replace(
     //     gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
     // gen = std::regex_replace(
     //     gen, std::regex("\\*\\*\\**", std::regex::extended), "");
     // Strip trailing cutted sentences:
     gen = std::regex_replace(
-        gen, std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*", std::regex::extended),
+        gen,
+        std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*", std::regex::extended),
         "$1");
     rtrim_nl(gen);
     return gen;
@@ -466,6 +526,44 @@ struct Conversation {
     }
 
     std::string chatlog_text() { return concatl(chatlog); }
+
+    std::string chatlog_text_ext() { return concatl(chatlog, true); }
+
+    void log_chatlog_to_file(int seed,
+                             const std::string &model_file,
+                             json prompt_test,
+                             llama_sampling_params &sp) {
+        std::string test_id = prompt_test.value("id", "unknown_test_id");
+        json sinfo = sparams_to_json(sp);
+
+        std::string out_file_name = "chatlog_" + std::to_string(time(NULL)) +
+                                    "_" + model_file + "_" + test_id + ".md";
+        std::ofstream outf(out_file_name);
+        outf << "# Chatlog for Test ID " << test_id << ", seed " << seed
+             << "\n\n";
+        outf << "Model Filename: " << model_file << "\n\n";
+        outf << "## Sampling Parameters\n\n```json\n";
+        outf << sinfo.dump(2, ' ', false, json::error_handler_t::replace);
+        outf << "\n```\n\n";
+        outf << "## Character Prompt '"
+             << replacer.apply_replacements(test_replacements, "<CHAR>")
+             << "'\n\n";
+        outf << "```\n";
+        outf << char_prompt;
+        outf << "\n```\n\n";
+        outf << "## User Prompt '"
+             << replacer.apply_replacements(test_replacements, "<USER>")
+             << "'\n\n";
+        outf << "```\n";
+        outf << user_prompt;
+        outf << "\n```\n\n";
+        outf << "## Chatlog\n\n";
+        outf << chatlog_text_ext();
+        outf << "\n";
+        outf.close();
+
+        printf("wrote file %s\n", out_file_name.c_str());
+    }
 };
 
 struct Decoder {
@@ -481,8 +579,11 @@ struct Decoder {
     }
 
     void refeed_tokens_for_sampling(TokenVec &tokens) {
-        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n", tokens.p0, tokens.p1,
-               tokens.size(), tokens.to_string().c_str());
+        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n",
+               tokens.p0,
+               tokens.p1,
+               tokens.size(),
+               tokens.to_string().c_str());
         llama_sampling_reset(ctx_sampling);
         for (auto tok : tokens.tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
@@ -502,7 +603,9 @@ struct Decoder {
         batch = llama_batch_init(tokens.size(), 0, 1);
         int i = 0;
         // tokens.print();
-        printf("### batch seq_id=%d, p0=%d to p1=%ld\n", seq_id, p0,
+        printf("### batch seq_id=%d, p0=%d to p1=%ld\n",
+               seq_id,
+               p0,
                p0 + tokens.size());
         for (auto tok : tokens.tokens) {
             llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
@@ -525,7 +628,9 @@ struct Decoder {
         return ok;
     }
 
-    bool decode(TokenVec &tokens, bool only_last_token, llama_pos p0,
+    bool decode(TokenVec &tokens,
+                bool only_last_token,
+                llama_pos p0,
                 llama_seq_id seq_id) {
         llama_batch batch;
 
@@ -534,8 +639,8 @@ struct Decoder {
             // d// printf("### batch seq_id=%d, p0=%d\n", seq_id, p0);
             // d// tokens.print_last();
             llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, true);
-            llama_sampling_accept(ctx_sampling, *g_ctx, tokens.get_last(),
-                                  true);
+            llama_sampling_accept(
+                ctx_sampling, *g_ctx, tokens.get_last(), true);
             tokens.p0 = p0;
             tokens.p1 = p0 + 1;
 
@@ -571,9 +676,6 @@ struct Decoder {
         return ok;
     }
 };
-
-
-
 
 int prompt_piece_seq_id = 0;
 
@@ -614,8 +716,8 @@ struct PromptPiece {
         llama_pos offs = new_p0 - tokens.p0;
 
         llama_kv_cache_seq_cp(*g_ctx, seq_id, new_seq_id, tokens.p0, tokens.p1);
-        llama_kv_cache_seq_shift(*g_ctx, new_seq_id, tokens.p0, tokens.p1,
-                                 offs);
+        llama_kv_cache_seq_shift(
+            *g_ctx, new_seq_id, tokens.p0, tokens.p1, offs);
 
         seq_id = new_seq_id;
         tokens.p0 = tokens.p0 + offs;
@@ -644,8 +746,10 @@ struct PromptPiece {
         return true;
     }
 
-    bool complete(Decoder &decoder, StopSequences &stop_seq,
-                  const std::string &next_piece, int n_tokens,
+    bool complete(Decoder &decoder,
+                  StopSequences &stop_seq,
+                  const std::string &next_piece,
+                  int n_tokens,
                   std::string &output) {
         int pre_usage = llama_kv_cache_usage(**g_ctx);
 
@@ -657,8 +761,10 @@ struct PromptPiece {
         if (!decoder.decode(leader_tokens, false, tokens.p1, seq_id)) {
             return false;
         }
-        printf("LEADER[p0=%d,p1=%d,size=%ld][%s]\n", leader_tokens.p0,
-               leader_tokens.p1, leader_tokens.size(),
+        printf("LEADER[p0=%d,p1=%d,size=%ld][%s]\n",
+               leader_tokens.p0,
+               leader_tokens.p1,
+               leader_tokens.size(),
                leader_tokens.to_string().c_str());
 
         TokenVec new_tokens = leader_tokens.spawn_continuation();
@@ -735,7 +841,8 @@ struct DualPrefixPrompt {
     }
 
     void use_prefix1() {
-        printf("USE PREFIX1(p1=%d)[%s]\n", prefix1.get_p1(),
+        printf("USE PREFIX1(p1=%d)[%s]\n",
+               prefix1.get_p1(),
                prefix1.tokens.to_string().c_str());
         if (!is_at_prefix1) {
             mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
@@ -744,7 +851,8 @@ struct DualPrefixPrompt {
     }
 
     void use_prefix2() {
-        printf("USE PREFIX2(p1=%d)[%s]\n", prefix2.get_p1(),
+        printf("USE PREFIX2(p1=%d)[%s]\n",
+               prefix2.get_p1(),
                prefix2.tokens.to_string().c_str());
         if (is_at_prefix1) {
             mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
@@ -757,11 +865,13 @@ struct DualPrefixPrompt {
         return mid_piece.append(decoder, new_tokens);
     }
 
-    bool complete(Decoder &decoder, StopSequences &stop_seq,
-                  const std::string &add_prompt, int n_tokens,
+    bool complete(Decoder &decoder,
+                  StopSequences &stop_seq,
+                  const std::string &add_prompt,
+                  int n_tokens,
                   std::string &output) {
-        return mid_piece.complete(decoder, stop_seq, add_prompt, n_tokens,
-                                  output);
+        return mid_piece.complete(
+            decoder, stop_seq, add_prompt, n_tokens, output);
     }
 };
 
@@ -776,7 +886,8 @@ struct PromptProcessor {
     std::string last_raw_response;
     bool broken_rep_pen;
 
-    PromptProcessor(int batch, struct llama_sampling_context *ctxs,
+    PromptProcessor(int batch,
+                    struct llama_sampling_context *ctxs,
                     json prompt_runner_conf)
         : n_past(0),
           n_batch(batch),
@@ -931,7 +1042,8 @@ struct PromptProcessor {
         // truncating embd if necessary.
         if ((int)embd.size() > max_embd_size) {
             auto skipped_tokens = embd.size() - max_embd_size;
-            printf("<<input too long: skipped %zu token%s>>", skipped_tokens,
+            printf("<<input too long: skipped %zu token%s>>",
+                   skipped_tokens,
                    skipped_tokens != 1 ? "s" : "");
             fflush(stdout);
             embd.resize(max_embd_size);
@@ -959,11 +1071,13 @@ struct PromptProcessor {
     }
 };
 
-void record_token_info(std::vector<std::string> &responses, json &j_tok_resps,
+void record_token_info(std::vector<std::string> &responses,
+                       json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling);
 
-void record_token_info(std::vector<std::string> &responses, json &j_tok_resps,
+void record_token_info(std::vector<std::string> &responses,
+                       json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling) {
     const int n_vocab = llama_n_vocab(*g_model);
@@ -1015,8 +1129,10 @@ llama_token generate_sample_seeded(std::vector<std::string> &responses,
                                    struct llama_sampling_context *ctx_sampling);
 
 llama_token generate_sample_seeded(
-    std::vector<std::string> &responses, json j_resps,
-    std::vector<int64_t> &sample_seeds, PromptRunContext &prc,
+    std::vector<std::string> &responses,
+    json j_resps,
+    std::vector<int64_t> &sample_seeds,
+    PromptRunContext &prc,
     struct llama_sampling_context *ctx_sampling) {
     llama_token id = 0;
     for (auto seed : sample_seeds) {
@@ -1035,10 +1151,12 @@ llama_token generate_sample_seeded(
 }
 
 bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
-                             std::string &piece, std::string &prevlog);
+                             std::string &piece,
+                             std::string &prevlog);
 
 bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
-                             std::string &piece, std::string &prevlog) {
+                             std::string &piece,
+                             std::string &prevlog) {
     if (chatlog.size() < 2) {
         return false;
     }
@@ -1116,8 +1234,8 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    fprintf(stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER,
-            BUILD_COMMIT);
+    fprintf(
+        stderr, "%s: build = %d (%s)\n", __func__, BUILD_NUMBER, BUILD_COMMIT);
 
     if (params.seed == LLAMA_DEFAULT_SEED) {
         params.seed = time(NULL);
@@ -1155,7 +1273,9 @@ int main(int argc, char **argv) {
         LOG_TEE(
             "%s: warning: model was trained on only %d context tokens (%d "
             "specified)\n",
-            __func__, n_ctx_train, n_ctx);
+            __func__,
+            n_ctx_train,
+            n_ctx);
     }
 
     if (params.n_ctx < 8) {
@@ -1168,8 +1288,10 @@ int main(int argc, char **argv) {
     // print system information
     {
         fprintf(stderr, "\n");
-        fprintf(stderr, "system_info: n_threads = %d / %d | %s\n",
-                params.n_threads, std::thread::hardware_concurrency(),
+        fprintf(stderr,
+                "system_info: n_threads = %d / %d | %s\n",
+                params.n_threads,
+                std::thread::hardware_concurrency(),
                 llama_print_system_info());
     }
 
@@ -1286,13 +1408,16 @@ int main(int argc, char **argv) {
                     fprintf(stderr,
                             "%s: error: prompt is too long (%d tokens, %d "
                             "predict, max %d)\n",
-                            __func__, (int)embd_inp.size(),
-                            (int)params.n_predict, n_ctx - 4);
+                            __func__,
+                            (int)embd_inp.size(),
+                            (int)params.n_predict,
+                            n_ctx - 4);
                     return 1;
                 }
 
                 if (first) {
-                    fprintf(stderr, "sampling: \n%s\n",
+                    fprintf(stderr,
+                            "sampling: \n%s\n",
                             llama_sampling_print(sparams).c_str());
                 }
 
@@ -1366,10 +1491,18 @@ int main(int argc, char **argv) {
 
                     std::string out;
 
-                    for (int k = 0; k < 6; k++) {
-                        printf("#########################################################################\n");
-                        printf("#####%7d ############################################################\n", k);
-                        printf("#########################################################################\n");
+                    for (int k = 0; k < 20; k++) {
+                        printf(
+                            "##################################################"
+                            "#######################\n");
+                        printf(
+                            "#####%7d "
+                            "##################################################"
+                            "##########\n",
+                            k);
+                        printf(
+                            "##################################################"
+                            "#######################\n");
                         bool is_user = k % 2 == 0;
                         if (is_user) {
                             dpp.use_prefix1();
@@ -1378,13 +1511,32 @@ int main(int argc, char **argv) {
                         }
 
                         decoder.reset_seed(seed_value);
-                        dpp.complete(decoder, stop_seq,
+                        dpp.complete(decoder,
+                                     stop_seq,
                                      conversation.next_completion_fmt(is_user),
-                                     70, out);
+                                     70,
+                                     out);
                         std::string log_entry =
                             conversation.append_raw_chat_response(is_user, out);
                         dpp.feed_mid_piece(decoder, log_entry);
                     }
+
+                    std::string model_file = params.model.c_str();
+                    model_file =
+                        model_file.substr(model_file.find_last_of("/\\") + 1);
+                    conversation.log_chatlog_to_file(
+                        seed_value, model_file, prompt_test, sparams);
+
+                    //                    decoder.reset_seed(seed_value);
+                    //                    dpp.complete(decoder, stop_seq,
+                    //                                 conversation.next_completion_fmt(false),
+                    //                                 70, out);
+                    //                    printf("GEN1[%s]\n", out.c_str());
+                    //                    decoder.reset_seed(seed_value);
+                    //                    dpp.complete(decoder, stop_seq,
+                    //                                 conversation.next_completion_fmt(false),
+                    //                                 70, out);
+                    //                    printf("GEN2[%s]\n", out.c_str());
 
                     //                    dpp.complete(decoder, stop_seq,
                     //                    "Loki:", 70, out);
@@ -1601,8 +1753,8 @@ int main(int argc, char **argv) {
                     struct llama_sampling_context *ctx_sampling =
                         llama_sampling_init(sparams);
 
-                    PromptProcessor proc(params.n_batch, ctx_sampling,
-                                         prompt_runner_conf);
+                    PromptProcessor proc(
+                        params.n_batch, ctx_sampling, prompt_runner_conf);
                     if (prompt_test.value("broken_rep_pen", false)) {
                         proc.set_broken_rep_pen();
                     }
@@ -1615,18 +1767,20 @@ int main(int argc, char **argv) {
                         }
 
                         if (record_next_token_info) {
-                            record_token_info(responses, j_tok_resps, prun_ctx,
-                                              ctx_sampling);
+                            record_token_info(
+                                responses, j_tok_resps, prun_ctx, ctx_sampling);
                         }
 
                         llama_token id = 0;
                         if (sample_seeds.size() > 0) {
-                            id = generate_sample_seeded(responses, j_resps,
-                                                        sample_seeds, prun_ctx,
+                            id = generate_sample_seeded(responses,
+                                                        j_resps,
+                                                        sample_seeds,
+                                                        prun_ctx,
                                                         ctx_sampling);
                         } else {
-                            id = llama_sampling_sample(ctx_sampling, ctx,
-                                                       nullptr);
+                            id = llama_sampling_sample(
+                                ctx_sampling, ctx, nullptr);
                         }
 
                         proc.add_generated(id);
@@ -1645,8 +1799,8 @@ int main(int argc, char **argv) {
                     std::string gen = proc.get_response();
                     int gen_tok_cnt = proc.get_last_response_token_count();
 
-                    j_resps.push_back(make_response(responses, prun_ctx, gen,
-                                                    gen_tok_cnt, json()));
+                    j_resps.push_back(make_response(
+                        responses, prun_ctx, gen, gen_tok_cnt, json()));
 
                     llama_sampling_free(ctx_sampling);
                 }
@@ -1671,16 +1825,9 @@ int main(int argc, char **argv) {
     printf("%s\n", responses_json_dump.c_str());
     fflush(stdout);
 
-    json j_params;
+    json j_params = sparams_to_json(sparams);
     j_params["rope_freq_base"] = params.rope_freq_base;
     j_params["rope_freq_scale"] = params.rope_freq_scale;
-    j_params["temp"] = sparams.temp;
-    j_params["top_k"] = sparams.top_k;
-    j_params["top_p"] = sparams.top_p;
-    j_params["tfs_z"] = sparams.tfs_z;
-    j_params["typical_p"] = sparams.typical_p;
-    j_params["repeat_last_n"] = sparams.penalty_last_n;
-    j_params["repeat_penality"] = sparams.penalty_repeat;
 
     json results;
     results["params"] = j_params;
