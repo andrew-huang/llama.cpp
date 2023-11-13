@@ -15,6 +15,7 @@
 .DS_Store
 .build/
 .cache/
+.ccls-cache/
 .direnv/
 .envrc
 .swiftpm
@@ -47,6 +48,7 @@ models-mnt
 /llama-bench
 /prompt_runner
 /llava
+/llava-cli
 /main
 /metal
 /perplexity
@@ -65,7 +67,7 @@ models-mnt
 /parallel
 /train-text-from-scratch
 /vdot
-build-info.h
+/common/build-info.cpp
 arm_neon.h
 compile_commands.json
 CMakeSettings.json

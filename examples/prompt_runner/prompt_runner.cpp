@@ -573,9 +573,7 @@ struct Decoder {
         ctx_sampling = llama_sampling_init(sparams);
     }
 
-    void init() {
-        llama_kv_cache_tokens_rm(*g_ctx, -1, -1);
-    }
+    void init() { llama_kv_cache_clear(*g_ctx); }
 
     void reset_seed(int seed) {
         //        printf("RESET SEED %d\n", seed);
@@ -866,8 +864,7 @@ struct DualPrefixPrompt {
 
     size_t prompt_length() {
         size_t len = prefix1.tokens.size();
-        if (prefix2.tokens.size() > len)
-            len = prefix2.tokens.size();
+        if (prefix2.tokens.size() > len) len = prefix2.tokens.size();
         len += mid_piece.tokens.size();
         return len;
     }
@@ -923,7 +920,7 @@ struct PromptProcessor {
         }
     }
 
-    void init() { llama_kv_cache_tokens_rm(*g_ctx, -1, -1); }
+    void init() { llama_kv_cache_clear(*g_ctx); }
 
     void add_tokens(TokenVec &tokens) { add_tokens(tokens.tokens); }
 
