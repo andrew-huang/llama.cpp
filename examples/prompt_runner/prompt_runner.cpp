@@ -864,6 +864,14 @@ struct DualPrefixPrompt {
         }
     }
 
+    size_t prompt_length() {
+        size_t len = prefix1.tokens.size();
+        if (prefix2.tokens.size() > len)
+            len = prefix2.tokens.size();
+        len += mid_piece.tokens.size();
+        return len;
+    }
+
     bool feed_mid_piece(Decoder &decoder, const std::string &mid) {
         TokenVec new_tokens(mid);
         return mid_piece.append(decoder, new_tokens);
@@ -1524,6 +1532,10 @@ int main(int argc, char **argv) {
                         std::string log_entry =
                             conversation.append_raw_chat_response(is_user, out);
                         dpp.feed_mid_piece(decoder, log_entry);
+
+                        if (dpp.prompt_length() > 2100) {
+                            break;
+                        }
                     }
 
                     std::string model_file = params.model.c_str();
