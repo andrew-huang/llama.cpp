@@ -59,7 +59,7 @@ std::string concatl(const std::vector<std::string> &l, bool indent) {
         if (indent) {
             std::string le = logentry;
             std::replace(le.begin(), le.end(), '\n', ' ');
-            logstr += "    " + le + "\n";
+            logstr += "    " + le + "\n\n";
         } else {
             logstr += logentry;
         }
@@ -536,8 +536,8 @@ struct Conversation {
         std::string test_id = prompt_test.value("id", "unknown_test_id");
         json sinfo = sparams_to_json(sp);
 
-        std::string out_file_name = "chatlog_" + std::to_string(time(NULL)) +
-                                    "_" + model_file + "_" + test_id + ".md";
+        std::string out_file_name = "chatlog_" + model_file + "_" + test_id +
+                                    "_" + std::to_string(time(NULL)) + ".md";
         std::ofstream outf(out_file_name);
         outf << "# Chatlog for Test ID " << test_id << ", seed " << seed
              << "\n\n";
@@ -571,6 +571,10 @@ struct Decoder {
 
     Decoder(const llama_sampling_params &sparams) {
         ctx_sampling = llama_sampling_init(sparams);
+    }
+
+    void init() {
+        llama_kv_cache_tokens_rm(*g_ctx, -1, -1);
     }
 
     void reset_seed(int seed) {
@@ -1483,6 +1487,7 @@ int main(int argc, char **argv) {
                                          conversation.char_prompt);
 
                     Decoder decoder(sparams);
+                    decoder.init();
                     dpp.set_mid_piece(conversation.chatlog_text());
                     dpp.init_decode(decoder);
 
@@ -1491,7 +1496,7 @@ int main(int argc, char **argv) {
 
                     std::string out;
 
-                    for (int k = 0; k < 20; k++) {
+                    for (int k = 0; k < 50; k++) {
                         printf(
                             "##################################################"
                             "#######################\n");
