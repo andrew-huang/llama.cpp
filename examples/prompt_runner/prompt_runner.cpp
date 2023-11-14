@@ -352,6 +352,158 @@ struct TextReplacer {
     }
 };
 
+struct Inference {
+    struct Sequence {
+        // [p0,p1) describing the position in kv cache
+        int p0;
+        int p1;
+        // kv cache sequence ID
+        int seq_id;
+        // name of this sequence
+        std::string name;
+        // name of the previous sequence
+        std::string prev_name;
+        std::vector<llama_token> tokens;
+        // for rewinding
+        int recent_add_tokens;
+
+        Sequence() : p0(0), p1(0), seq_id(0), recent_add_tokens(0) {}
+
+        void commit() { recent_add_tokens = 0; }
+    };
+
+    int cur_seq_id;
+
+    int n_batch;
+    std::vector<Sequence> sequences;
+    llama_sampling_context *ctx_sampling;
+
+    Inference(llama_sampling_params &sparams, int nb)
+        : cur_seq_id(0), n_batch(nb) {
+        ctx_sampling = llama_sampling_init(sparams);
+    }
+
+    void reset_seed(int seed) {
+        // printf("RESET SEED %d\n", seed);
+        llama_set_rng_seed(*g_ctx, seed);
+    }
+
+    ~Inference() { llama_sampling_free(ctx_sampling); }
+
+    bool load_tokens(bool is_bos,
+                     const std::string &text,
+                     int seq_id,
+                     int p0,
+                     std::vector<llama_token> &out_tokens,
+                     int &p1) {
+        const bool add_bos =
+            is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
+        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), add_bos, true);
+
+        for (int i = 0; i < (int)tokens.size(); i += n_batch) {
+            int n_eval = (int)tokens.size() - i;
+            if (n_eval > n_batch) {
+                n_eval = n_batch;
+            }
+
+            auto batch = llama_batch_init(tokens.size(), 0, 1);
+            for (int j = 0; j < n_eval; j++) {
+                int tok_idx = j + i;
+                llama_batch_add(
+                    batch, tokens[tok_idx], p0 + tok_idx, {seq_id}, false);
+                out_tokens.push_back(tokens[tok_idx]);
+                p1 = p0 + tok_idx + 1;
+            }
+
+            if (llama_decode(*g_ctx, batch)) {
+                fprintf(stderr, "%s : failed to eval\n", __func__);
+                llama_batch_free(batch);
+                return false;
+            }
+
+            llama_batch_free(batch);
+        }
+
+        return true;
+    }
+
+    bool add_start_sequence(const std::string &name, const std::string &text) {
+        std::vector<llama_token> tokens;
+        int p1 = 0;
+        int seq_id = cur_seq_id++;
+
+        bool ok = load_tokens(true, text, seq_id, 0, tokens, p1);
+        if (ok) {
+            Sequence seq;
+            seq.p0 = 0;
+            seq.p1 = p1;
+            seq.seq_id = seq_id;
+            seq.tokens = tokens;
+            seq.name = name;
+            seq.recent_add_tokens = tokens.size();
+            sequences.push_back(seq);
+        }
+
+        return ok;
+    }
+
+    int get_sequence_idx(const std::string &name) {
+        for (size_t i = 0; i < sequences.size(); i++) {
+            if (sequences[i].name == name) {
+                return (int)i;
+            }
+        }
+
+        return -1;
+    }
+
+    void commit_sequence(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx >= 0) {
+            sequences[sidx].commit();
+        }
+    }
+
+    bool append_sequence(const std::string &name, const std::string &text) {
+        int sidx = get_sequence_idx(name);
+        Sequence *s = nullptr;
+        if (sidx >= 0) {
+            s = &sequences[sidx];
+        } else {
+            sequences.push_back(Sequence());
+            s = &sequences[sequences.size() - 1];
+            s->seq_id = cur_seq_id++;
+        }
+
+        s->name = name;
+
+        std::vector<llama_token> tokens;
+        int new_p1 = 0;
+        bool ok = load_tokens(false, text, s->seq_id, s->p1, tokens, new_p1);
+        s->p1 = new_p1;
+        s->recent_add_tokens += tokens.size();
+        return ok;
+    }
+
+    void reset_sampler_sequence(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return;
+        }
+
+        std::string name = sequences[sidx].prev_name;
+        if (name.size() > 0) {
+            reset_sampler_sequence(name);
+        }
+
+        llama_sampling_reset(ctx_sampling);
+
+        for (auto tok : sequences[sidx].tokens) {
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+        }
+    }
+};
+
 struct TokenVec {
     llama_pos p0;
     llama_pos p1;
@@ -1501,6 +1653,7 @@ int main(int argc, char **argv) {
 
                     std::string out;
 
+                    decoder.reset_seed(seed_value);
                     for (int k = 0; k < 50; k++) {
                         printf(
                             "##################################################"
@@ -1520,7 +1673,6 @@ int main(int argc, char **argv) {
                             dpp.use_prefix2();
                         }
 
-                        decoder.reset_seed(seed_value);
                         dpp.complete(decoder,
                                      stop_seq,
                                      conversation.next_completion_fmt(is_user),
@@ -1530,7 +1682,7 @@ int main(int argc, char **argv) {
                             conversation.append_raw_chat_response(is_user, out);
                         dpp.feed_mid_piece(decoder, log_entry);
 
-                        if (dpp.prompt_length() > 2100) {
+                        if (dpp.prompt_length() > 3900) {
                             break;
                         }
                     }
