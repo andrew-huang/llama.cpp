@@ -451,6 +451,9 @@ struct Inference {
                      int p0,
                      std::vector<llama_token> &out_tokens,
                      int &p1) {
+        if (text.size() == 0)
+            return true;
+
         const bool add_bos =
             is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
         auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), add_bos, true);
@@ -497,6 +500,7 @@ struct Inference {
             seq.name = name;
             seq.recent_add_tokens = tokens.size();
             sequences.push_back(seq);
+            printf("SEQUENCEb[%s] seq_id=%d\n", name.c_str(), seq.seq_id);
         }
 
         return ok;
@@ -537,6 +541,7 @@ struct Inference {
         llama_kv_cache_seq_shift(*g_ctx, src->seq_id, src->p0, src->p1, offs);
         src->p0 += offs;
         src->p1 += offs;
+        src->prev_name = new_prev;
 
         llama_kv_cache_seq_cp(
             *g_ctx, src->seq_id, dest->seq_id, src->p0, src->p1);
@@ -556,14 +561,18 @@ struct Inference {
             return false;
         }
         Sequence *seq = &sequences[sidx];
+        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n", seq->seq_id, seq->p0, seq->p1);
 
         auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
         auto batch = llama_batch_init(tokens.size(), 0, 1);
         for (size_t i = 0; i < tokens.size(); i++) {
             bool is_last = (i + 1 == tokens.size());
+            //d// printf("ADDBATCH %d (is_last=%d) = %d\n", seq->p1, is_last, tokens[i]);
             llama_batch_add(
-                batch, tokens[i], seq->p1 + i, {seq->seq_id}, is_last);
+                batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
             seq->add_token(tokens[i]);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], true);
+//            printf("accept %d\n", tokens[i]);
         }
 
         int sample_idx = tokens.size() - 1;
@@ -576,6 +585,8 @@ struct Inference {
 
         llama_batch_free(batch);
 
+        //d// printf("COMPLETE SEQUENCE p0=%d, p1=%d, size=%d\n", seq->p0, seq->p1, seq->tokens.size());
+
         int gen_count = 0;
         while (n_remain > 0) {
             llama_token tok = llama_sampling_sample(
@@ -583,7 +594,8 @@ struct Inference {
 
             gen_count += 1;
 
-            llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+//            printf("accept %d\n", tok);
 
             if (tok == llama_token_eos(*g_model)) {
                 return true;
@@ -650,6 +662,8 @@ struct Inference {
             s->seq_id = cur_seq_id++;
         }
 
+        //d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
+
         s->name = name;
 
         std::vector<llama_token> tokens;
@@ -658,6 +672,7 @@ struct Inference {
         for (auto tok : tokens) {
             s->add_token(tok);
         }
+        printf("load tokens seq_id=%d new_p1=%d, seq->p1=%d\n", s->seq_id, new_p1, s->p1);
         return ok;
     }
 
@@ -675,6 +690,7 @@ struct Inference {
 
         for (auto tok : sequences[sidx].tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+//            printf("accept[%s] %d\n", name.c_str(), tok);
         }
     }
 };
@@ -1805,7 +1821,7 @@ int main(int argc, char **argv) {
                     //   described here.", "turns": 50
                     // },
 
-                    if (params.n_batch == 512) {
+                    if (true || params.n_batch == 512) {
                         Inference infer(sparams, params.n_batch);
 
                         StopSequences stop_seq;
@@ -1841,6 +1857,25 @@ int main(int argc, char **argv) {
                             });
                         printf(
                             "Completed[%s]\n",
+                            infer.get_recently_added_tokens_str("log").c_str());
+
+                        infer.rewind("log");
+
+                        infer.reset_seed(seed_value);
+                        infer.reset_sampler("log");
+
+                        infer.complete(
+                            "log",
+                            conversation.next_completion_fmt(is_user),
+                            70,
+                            [](int cnt, const std::string &comp) {
+//                                if (cnt > 65) {
+//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
+//                                }
+                                return false;
+                            });
+                        printf(
+                            "Completed2[%s]\n",
                             infer.get_recently_added_tokens_str("log").c_str());
 
                         infer.rewind("log");
