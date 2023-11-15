@@ -370,6 +370,61 @@ struct Inference {
         Sequence() : p0(0), p1(0), seq_id(0), recent_add_tokens(0) {}
 
         void commit() { recent_add_tokens = 0; }
+
+        void add_token(llama_token tok, int new_p1 = -1) {
+            if (new_p1 > 0) {
+                if ((p1 + 1) != new_p1) {
+                    printf(
+                        "WARNING: Sequence gets appended unconnected token! %d "
+                        "!= %d (%s)\n",
+                        p1 + 1,
+                        new_p1,
+                        recent_string().c_str());
+                }
+                p1 = new_p1;
+            } else {
+                p1 += 1;
+            }
+            tokens.push_back(tok);
+            recent_add_tokens += 1;
+        }
+
+        void rewind() {
+            llama_kv_cache_seq_rm(*g_ctx, seq_id, p1 - recent_add_tokens, p1);
+            for (int i = 0; i < recent_add_tokens; i++) {
+                tokens.pop_back();
+                p1 -= 1;
+            }
+            recent_add_tokens = 0;
+        }
+
+        std::string to_string() {
+            std::string str;
+            for (auto tok : tokens) {
+                str += llama_token_to_piece(*g_ctx, tok);
+            }
+            return str;
+        }
+
+        std::string recent_string() {
+            if (recent_add_tokens <= 0) {
+                return "";
+            }
+
+            if (tokens.size() < recent_add_tokens) {
+                return "RECENT_TOKENS_BUGBUGBUG";
+            }
+
+            std::string str;
+            for (size_t i = tokens.size() - recent_add_tokens;
+                 i < tokens.size();
+                 i++) {
+                llama_token tok = tokens[i];
+                str += llama_token_to_piece(*g_ctx, tok);
+            }
+
+            return str;
+        }
     };
 
     int cur_seq_id;
@@ -427,7 +482,7 @@ struct Inference {
         return true;
     }
 
-    bool add_start_sequence(const std::string &name, const std::string &text) {
+    bool add_start(const std::string &name, const std::string &text) {
         std::vector<llama_token> tokens;
         int p1 = 0;
         int seq_id = cur_seq_id++;
@@ -457,14 +512,134 @@ struct Inference {
         return -1;
     }
 
-    void commit_sequence(const std::string &name) {
+    void commit(const std::string &name) {
         int sidx = get_sequence_idx(name);
         if (sidx >= 0) {
             sequences[sidx].commit();
         }
     }
 
-    bool append_sequence(const std::string &name, const std::string &text) {
+    bool rebase(const std::string &name, const std::string &new_prev) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+
+        int dest_idx = get_sequence_idx(new_prev);
+        if (dest_idx < 0) {
+            return false;
+        }
+
+        Sequence *src = &sequences[sidx];
+        Sequence *dest = &sequences[dest_idx];
+
+        int offs = dest->p1 - src->p0;
+        llama_kv_cache_seq_shift(*g_ctx, src->seq_id, src->p0, src->p1, offs);
+        src->p0 += offs;
+        src->p1 += offs;
+
+        llama_kv_cache_seq_cp(
+            *g_ctx, src->seq_id, dest->seq_id, src->p0, src->p1);
+        llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
+
+        src->seq_id = dest->seq_id;
+
+        return true;
+    }
+
+    bool complete(const std::string &name,
+                  const std::string &text,
+                  int n_remain,
+                  std::function<bool(int, const std::string &)> check_for_end) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
+        auto batch = llama_batch_init(tokens.size(), 0, 1);
+        for (size_t i = 0; i < tokens.size(); i++) {
+            bool is_last = (i + 1 == tokens.size());
+            llama_batch_add(
+                batch, tokens[i], seq->p1 + i, {seq->seq_id}, is_last);
+            seq->add_token(tokens[i]);
+        }
+
+        int sample_idx = tokens.size() - 1;
+
+        if (llama_decode(*g_ctx, batch)) {
+            fprintf(stderr, "%s : failed to eval\n", __func__);
+            llama_batch_free(batch);
+            return false;
+        }
+
+        llama_batch_free(batch);
+
+        int gen_count = 0;
+        while (n_remain > 0) {
+            llama_token tok = llama_sampling_sample(
+                ctx_sampling, *g_ctx, nullptr, sample_idx);
+
+            gen_count += 1;
+
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
+
+            if (tok == llama_token_eos(*g_model)) {
+                return true;
+            }
+
+            seq->add_token(tok);
+
+            std::string seq_str = seq->recent_string();
+            // d// printf("SEQ %d %s\n", seq->recent_add_tokens,
+            // seq_str.c_str());
+            if (check_for_end(gen_count, seq_str)) {
+                n_remain = 0;
+            } else {
+                n_remain -= 1;
+            }
+
+            auto one_batch = llama_batch_init(tokens.size(), 0, 1);
+
+            llama_batch_add(one_batch, tok, seq->p1 - 1, {seq->seq_id}, true);
+            if (llama_decode(*g_ctx, one_batch)) {
+                fprintf(stderr, "%s : failed to eval\n", __func__);
+                llama_batch_free(one_batch);
+                return false;
+            }
+            sample_idx = 0;
+            llama_batch_free(one_batch);
+        }
+
+        return true;
+    }
+
+    std::string get_recently_added_tokens_str(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return "";
+        }
+        Sequence *seq = &sequences[sidx];
+
+        return seq->recent_string();
+    }
+
+    bool rewind(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        if (seq->recent_add_tokens > 0) {
+            seq->rewind();
+        }
+
+        return true;
+    }
+
+    bool append(const std::string &name, const std::string &text) {
         int sidx = get_sequence_idx(name);
         Sequence *s = nullptr;
         if (sidx >= 0) {
@@ -480,23 +655,23 @@ struct Inference {
         std::vector<llama_token> tokens;
         int new_p1 = 0;
         bool ok = load_tokens(false, text, s->seq_id, s->p1, tokens, new_p1);
-        s->p1 = new_p1;
-        s->recent_add_tokens += tokens.size();
+        for (auto tok : tokens) {
+            s->add_token(tok);
+        }
         return ok;
     }
 
-    void reset_sampler_sequence(const std::string &name) {
+    void reset_sampler(const std::string &name) {
         int sidx = get_sequence_idx(name);
         if (sidx < 0) {
             return;
         }
-
-        std::string name = sequences[sidx].prev_name;
-        if (name.size() > 0) {
-            reset_sampler_sequence(name);
-        }
-
         llama_sampling_reset(ctx_sampling);
+
+        std::string prev_name = sequences[sidx].prev_name;
+        if (prev_name.size() > 0) {
+            reset_sampler(prev_name);
+        }
 
         for (auto tok : sequences[sidx].tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
@@ -1630,68 +1805,134 @@ int main(int argc, char **argv) {
                     //   described here.", "turns": 50
                     // },
 
-                    StopSequences stop_seq;
-                    if (prompt_runner_conf.find("stop_sequences") !=
-                        prompt_runner_conf.end()) {
-                        stop_seq.set_stop_sequences(
-                            prompt_runner_conf["stop_sequences"]);
-                    }
+                    if (params.n_batch == 512) {
+                        Inference infer(sparams, params.n_batch);
 
-                    Conversation conversation(replacer, stop_seq, prompt_test);
-                    conversation.load_config(prompt_test["chat"]);
-
-                    DualPrefixPrompt dpp(conversation.user_prompt,
-                                         conversation.char_prompt);
-
-                    Decoder decoder(sparams);
-                    decoder.init();
-                    dpp.set_mid_piece(conversation.chatlog_text());
-                    dpp.init_decode(decoder);
-
-                    printf("MID[%s]\n",
-                           dpp.mid_piece.tokens.to_string().c_str());
-
-                    std::string out;
-
-                    decoder.reset_seed(seed_value);
-                    for (int k = 0; k < 50; k++) {
-                        printf(
-                            "##################################################"
-                            "#######################\n");
-                        printf(
-                            "#####%7d "
-                            "##################################################"
-                            "##########\n",
-                            k);
-                        printf(
-                            "##################################################"
-                            "#######################\n");
-                        bool is_user = k % 2 == 0;
-                        if (is_user) {
-                            dpp.use_prefix1();
-                        } else {
-                            dpp.use_prefix2();
+                        StopSequences stop_seq;
+                        if (prompt_runner_conf.find("stop_sequences") !=
+                            prompt_runner_conf.end()) {
+                            stop_seq.set_stop_sequences(
+                                prompt_runner_conf["stop_sequences"]);
                         }
 
-                        dpp.complete(decoder,
-                                     stop_seq,
-                                     conversation.next_completion_fmt(is_user),
-                                     70,
-                                     out);
-                        std::string log_entry =
-                            conversation.append_raw_chat_response(is_user, out);
-                        dpp.feed_mid_piece(decoder, log_entry);
+                        Conversation conversation(
+                            replacer, stop_seq, prompt_test);
+                        conversation.load_config(prompt_test["chat"]);
 
-                        if (dpp.prompt_length() > 3900) {
-                            break;
+                        infer.add_start("user", conversation.user_prompt);
+                        infer.add_start("char", conversation.char_prompt);
+                        infer.append("log", conversation.chatlog_text());
+                        infer.commit("log");
+                        infer.rebase("log", "user");
+
+                        infer.reset_seed(seed_value);
+                        infer.reset_sampler("log");
+
+                        bool is_user = true;
+                        infer.complete(
+                            "log",
+                            conversation.next_completion_fmt(is_user),
+                            70,
+                            [](int cnt, const std::string &comp) {
+//                                if (cnt > 65) {
+//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
+//                                }
+                                return false;
+                            });
+                        printf(
+                            "Completed[%s]\n",
+                            infer.get_recently_added_tokens_str("log").c_str());
+
+                        infer.rewind("log");
+
+                        infer.append("log", "Loki");
+                        infer.reset_seed(seed_value);
+                        infer.reset_sampler("log");
+
+                        infer.complete(
+                            "log",
+                            ":",//conversation.next_completion_fmt(is_user),
+                            70,
+                            [](int cnt, const std::string &comp) {
+//                                if (cnt > 65) {
+//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
+//                                }
+                                return false;
+                            });
+                        printf(
+                            "Completed[%s]\n",
+                            infer.get_recently_added_tokens_str("log").c_str());
+
+                    } else {
+                        StopSequences stop_seq;
+                        if (prompt_runner_conf.find("stop_sequences") !=
+                            prompt_runner_conf.end()) {
+                            stop_seq.set_stop_sequences(
+                                prompt_runner_conf["stop_sequences"]);
                         }
-                    }
 
-                    std::string model_file = params.model.c_str();
-                    model_file =
-                        model_file.substr(model_file.find_last_of("/\\") + 1);
-                    conversation.log_chatlog_to_file(
-                        seed_value, model_file, prompt_test, sparams);
+                        Conversation conversation(
+                            replacer, stop_seq, prompt_test);
+                        conversation.load_config(prompt_test["chat"]);
+
+                        DualPrefixPrompt dpp(conversation.user_prompt,
+                                             conversation.char_prompt);
+
+                        Decoder decoder(sparams);
+                        decoder.init();
+                        dpp.set_mid_piece(conversation.chatlog_text());
+                        dpp.init_decode(decoder);
+
+                        printf("MID[%s]\n",
+                               dpp.mid_piece.tokens.to_string().c_str());
+
+                        std::string out;
+
+                        decoder.reset_seed(seed_value);
+                        for (int k = 0; k < 1; k++) {
+                            printf(
+                                "##############################################"
+                                "####"
+                                "#######################\n");
+                            printf(
+                                "#####%7d "
+                                "##############################################"
+                                "####"
+                                "##########\n",
+                                k);
+                            printf(
+                                "##############################################"
+                                "####"
+                                "#######################\n");
+                            bool is_user = k % 2 == 0;
+                            if (is_user) {
+                                dpp.use_prefix1();
+                            } else {
+                                dpp.use_prefix2();
+                            }
+
+                            dpp.complete(
+                                decoder,
+                                stop_seq,
+                                conversation.next_completion_fmt(is_user),
+                                70,
+                                out);
+                            std::string log_entry =
+                                conversation.append_raw_chat_response(is_user,
+                                                                      out);
+                            dpp.feed_mid_piece(decoder, log_entry);
+
+                            if (dpp.prompt_length() > 3900) {
+                                break;
+                            }
+                        }
+
+                        std::string model_file = params.model.c_str();
+                        model_file = model_file.substr(
+                            model_file.find_last_of("/\\") + 1);
+                        conversation.log_chatlog_to_file(
+                            seed_value, model_file, prompt_test, sparams);
+                    }
 
                     //                    decoder.reset_seed(seed_value);
                     //                    dpp.complete(decoder, stop_seq,
