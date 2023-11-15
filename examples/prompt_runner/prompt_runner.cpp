@@ -445,14 +445,23 @@ struct Inference {
 
     ~Inference() { llama_sampling_free(ctx_sampling); }
 
+    int current_max_seq_token_count() {
+        int max = 0;
+        for (auto seq : sequences) {
+            if (seq.p1 > max) {
+                max = seq.p1;
+            }
+        }
+        return max;
+    }
+
     bool load_tokens(bool is_bos,
                      const std::string &text,
                      int seq_id,
                      int p0,
                      std::vector<llama_token> &out_tokens,
                      int &p1) {
-        if (text.size() == 0)
-            return true;
+        if (text.size() == 0) return true;
 
         const bool add_bos =
             is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
@@ -561,18 +570,21 @@ struct Inference {
             return false;
         }
         Sequence *seq = &sequences[sidx];
-        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n", seq->seq_id, seq->p0, seq->p1);
+        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
+               seq->seq_id,
+               seq->p0,
+               seq->p1);
 
         auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
         auto batch = llama_batch_init(tokens.size(), 0, 1);
         for (size_t i = 0; i < tokens.size(); i++) {
             bool is_last = (i + 1 == tokens.size());
-            //d// printf("ADDBATCH %d (is_last=%d) = %d\n", seq->p1, is_last, tokens[i]);
-            llama_batch_add(
-                batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
+            // d// printf("ADDBATCH %d (is_last=%d) = %d\n", seq->p1, is_last,
+            // tokens[i]);
+            llama_batch_add(batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
             seq->add_token(tokens[i]);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], true);
-//            printf("accept %d\n", tokens[i]);
+            //            printf("accept %d\n", tokens[i]);
         }
 
         int sample_idx = tokens.size() - 1;
@@ -585,7 +597,8 @@ struct Inference {
 
         llama_batch_free(batch);
 
-        //d// printf("COMPLETE SEQUENCE p0=%d, p1=%d, size=%d\n", seq->p0, seq->p1, seq->tokens.size());
+        // d// printf("COMPLETE SEQUENCE p0=%d, p1=%d, size=%d\n", seq->p0,
+        // seq->p1, seq->tokens.size());
 
         int gen_count = 0;
         while (n_remain > 0) {
@@ -595,7 +608,7 @@ struct Inference {
             gen_count += 1;
 
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-//            printf("accept %d\n", tok);
+            //            printf("accept %d\n", tok);
 
             if (tok == llama_token_eos(*g_model)) {
                 return true;
@@ -625,6 +638,16 @@ struct Inference {
         }
 
         return true;
+    }
+
+    std::string get_sequence_text(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return "";
+        }
+        Sequence *seq = &sequences[sidx];
+
+        return seq->to_string();
     }
 
     std::string get_recently_added_tokens_str(const std::string &name) {
@@ -662,7 +685,7 @@ struct Inference {
             s->seq_id = cur_seq_id++;
         }
 
-        //d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
+        // d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
 
         s->name = name;
 
@@ -672,7 +695,10 @@ struct Inference {
         for (auto tok : tokens) {
             s->add_token(tok);
         }
-        printf("load tokens seq_id=%d new_p1=%d, seq->p1=%d\n", s->seq_id, new_p1, s->p1);
+        printf("load tokens seq_id=%d new_p1=%d, seq->p1=%d\n",
+               s->seq_id,
+               new_p1,
+               s->p1);
         return ok;
     }
 
@@ -690,7 +716,7 @@ struct Inference {
 
         for (auto tok : sequences[sidx].tokens) {
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-//            printf("accept[%s] %d\n", name.c_str(), tok);
+            //            printf("accept[%s] %d\n", name.c_str(), tok);
         }
     }
 };
@@ -837,11 +863,11 @@ struct Conversation {
         printf("FOFO %s\n", user_prompt.c_str());
 
         std::string char_log_init = chat.value("char_log_init", "");
-        printf("FOFO\n");
         if (char_log_init.size() > 0) {
             replacer.add_extra("<RESPONSE>", char_log_init);
             std::string entry =
                 replacer.apply_replacements(test_replacements, char_log_fmt);
+            printf("FOFO %s\n", entry.c_str());
             chatlog.push_back(entry);
         }
 
@@ -864,7 +890,9 @@ struct Conversation {
         std::string entry = replacer.apply_replacements(
             test_replacements, is_user ? user_log_fmt : char_log_fmt);
         chatlog.push_back(entry);
-        printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
+
+        // d// printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
+
         return entry;
     }
 
@@ -1837,66 +1865,62 @@ int main(int argc, char **argv) {
 
                         infer.add_start("user", conversation.user_prompt);
                         infer.add_start("char", conversation.char_prompt);
+                        printf("APPEND:%s\n",
+                               conversation.chatlog_text().c_str());
                         infer.append("log", conversation.chatlog_text());
                         infer.commit("log");
-                        infer.rebase("log", "user");
-
-                        infer.reset_seed(seed_value);
-                        infer.reset_sampler("log");
-
                         bool is_user = true;
-                        infer.complete(
-                            "log",
-                            conversation.next_completion_fmt(is_user),
-                            70,
-                            [](int cnt, const std::string &comp) {
-//                                if (cnt > 65) {
-//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
-//                                }
-                                return false;
-                            });
-                        printf(
-                            "Completed[%s]\n",
-                            infer.get_recently_added_tokens_str("log").c_str());
+                        for (int i = 0; i < 50; i++) {
 
-                        infer.rewind("log");
+                            printf("SEQ[log %d]=%s\n",
+                                   infer.current_max_seq_token_count(),
+                                   infer.get_sequence_text("log").c_str());
+                            if (infer.current_max_seq_token_count() > 3900) {
+                                break;
+                            }
 
-                        infer.reset_seed(seed_value);
-                        infer.reset_sampler("log");
+                            if (is_user) {
+                                infer.rebase("log", "user");
+                            } else {
+                                infer.rebase("log", "char");
+                            }
 
-                        infer.complete(
-                            "log",
-                            conversation.next_completion_fmt(is_user),
-                            70,
-                            [](int cnt, const std::string &comp) {
-//                                if (cnt > 65) {
-//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
-//                                }
-                                return false;
-                            });
-                        printf(
-                            "Completed2[%s]\n",
-                            infer.get_recently_added_tokens_str("log").c_str());
+                            infer.reset_seed(seed_value + i);
+                            infer.reset_sampler("log");
 
-                        infer.rewind("log");
+                            std::string completion_start =
+                                conversation.next_completion_fmt(is_user);
 
-                        infer.append("log", "Loki");
-                        infer.reset_seed(seed_value);
-                        infer.reset_sampler("log");
+                            infer.complete(
+                                "log",
+                                completion_start,
+                                70,
+                                [&](int cnt, const std::string &comp) {
+                                    std::string tr;
+                                    return stop_seq.trim_stop_sequence(
+                                        comp.substr(4, comp.size() - 4), tr);
+                                });
+                            std::string completion =
+                                infer.get_recently_added_tokens_str("log");
+                            completion =
+                                completion.substr(completion_start.size());
+                            infer.rewind("log");
 
-                        infer.complete(
-                            "log",
-                            ":",//conversation.next_completion_fmt(is_user),
-                            70,
-                            [](int cnt, const std::string &comp) {
-//                                if (cnt > 65) {
-//                                    printf("C:[%d][%s]\n", cnt, comp.c_str());
-//                                }
-                                return false;
-                            });
-                        printf(
-                            "Completed[%s]\n",
-                            infer.get_recently_added_tokens_str("log").c_str());
+                            std::string log_entry =
+                                conversation.append_raw_chat_response(
+                                    is_user, completion);
+                            printf("> %s", log_entry.c_str());
+                            infer.append("log", log_entry);
+                            infer.commit("log");
+
+                            is_user = !is_user;
+                        }
+
+                        std::string model_file = params.model.c_str();
+                        model_file = model_file.substr(
+                            model_file.find_last_of("/\\") + 1);
+                        conversation.log_chatlog_to_file(
+                            seed_value, model_file, prompt_test, sparams);
 
                     } else {
                         StopSequences stop_seq;
