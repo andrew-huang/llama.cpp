@@ -575,16 +575,21 @@ struct Inference {
 
         Sequence *src = &sequences[sidx];
         Sequence *dest = &sequences[dest_idx];
+        printf("REBASE %d onto %d\n", src->seq_id, dest->seq_id);
 
+        llama_kv_cache_debug_print(*g_ctx, "before");
         int offs = dest->p1 - src->p0;
         llama_kv_cache_seq_shift(*g_ctx, src->seq_id, src->p0, src->p1, offs);
+        llama_kv_cache_debug_print(*g_ctx, "aft_shift");
         src->p0 += offs;
         src->p1 += offs;
         src->prev_name = new_prev;
 
         llama_kv_cache_seq_cp(
             *g_ctx, src->seq_id, dest->seq_id, src->p0, src->p1);
+        llama_kv_cache_debug_print(*g_ctx, "aft_cp");
         llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
+        llama_kv_cache_debug_print(*g_ctx, "after");
 
         src->seq_id = dest->seq_id;
 

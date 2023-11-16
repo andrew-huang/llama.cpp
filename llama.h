@@ -1,6 +1,8 @@
 #ifndef LLAMA_H
 #define LLAMA_H
 
+#include <string>
+
 #include "ggml.h"
 #ifdef GGML_USE_CUBLAS
 #include "ggml-cuda.h"
@@ -351,6 +353,8 @@ extern "C" {
     // Clear the KV cache
     LLAMA_API void llama_kv_cache_clear(
             struct llama_context * ctx);
+
+    void llama_kv_cache_debug_print(struct llama_context * ctx, const std::string &tag);
 
     // Removes all tokens that belong to the specified sequence and have positions in [p0, p1)
     // seq_id < 0 : match any sequence
