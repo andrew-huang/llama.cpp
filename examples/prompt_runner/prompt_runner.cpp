@@ -285,6 +285,29 @@ json make_response(std::vector<std::string> &responses,
 
 std::string trim_generated_chat_response(std::string gen);
 
+std::string cleanup_unbalanced(const std::string &str, char quot) {
+    bool found_open = false;
+    size_t idx_last_quot = 0;
+    for (size_t i = 0; i < str.size(); i++) {
+        if (str[i] == quot) {
+            idx_last_quot = i;
+            found_open = !found_open;
+        }
+    }
+    if (found_open) {
+        std::string tmp = str.substr(0, idx_last_quot);
+        trim_nl(tmp, " \r\n");
+        if (tmp.size() == 0) {
+            // removing the unbalanced part would make the result empty!
+            // so we append the unbalanced quot instead.
+            tmp = str + quot;
+        }
+
+        return tmp;
+    }
+    return str;
+}
+
 std::string trim_generated_chat_response(std::string gen) {
     // Strip extra newlines:
     gen = std::regex_replace(
@@ -298,6 +321,8 @@ std::string trim_generated_chat_response(std::string gen) {
         gen,
         std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*", std::regex::extended),
         "$1");
+    gen = cleanup_unbalanced(gen, '*');
+    gen = cleanup_unbalanced(gen, '"');
     rtrim_nl(gen);
     return gen;
 }
@@ -411,7 +436,7 @@ struct Inference {
                 return "";
             }
 
-            if (tokens.size() < (size_t) recent_add_tokens) {
+            if (tokens.size() < (size_t)recent_add_tokens) {
                 return "RECENT_TOKENS_BUGBUGBUG";
             }
 
@@ -469,7 +494,7 @@ struct Inference {
 
         const bool add_bos =
             is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
-        std::string t = is_bos ? std::string(" ") + text : text;
+        std::string t = add_bos ? std::string(" ") + text : text;
         auto tokens = ::llama_tokenize(*g_ctx, t.c_str(), add_bos, true);
 
         for (int i = 0; i < (int)tokens.size(); i += n_batch) {
@@ -602,8 +627,14 @@ struct Inference {
 
         llama_batch_free(batch);
 
-        // d// printf("COMPLETE SEQUENCE p0=%d, p1=%d, size=%d\n", seq->p0,
-        // seq->p1, seq->tokens.size());
+        printf("COMPLETE SEQUENCE[%s: %s] seq_id=%d, p0=%d, p1=%d, size=%d, n_gen=%d\n",
+               seq->name.c_str(),
+               text.c_str(),
+               seq->seq_id,
+               seq->p0,
+               seq->p1,
+               (int) seq->tokens.size(),
+               n_remain);
 
         int gen_count = 0;
         while (n_remain > 0) {
@@ -643,6 +674,105 @@ struct Inference {
         }
 
         return true;
+    }
+
+    bool sample(
+        const std::string &name,
+        const std::string &text,
+        int n_remain,
+        std::function<llama_token(
+            llama_token_data_array &, const std::string &, bool &)> sample) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
+        auto batch = llama_batch_init(tokens.size(), 0, 1);
+        for (size_t i = 0; i < tokens.size(); i++) {
+            bool is_last = (i + 1 == tokens.size());
+            llama_batch_add(batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
+            seq->add_token(tokens[i]);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], true);
+        }
+
+        int sample_idx = tokens.size() - 1;
+
+        if (llama_decode(*g_ctx, batch)) {
+            fprintf(stderr, "%s : failed to eval\n", __func__);
+            llama_batch_free(batch);
+            return false;
+        }
+
+        llama_batch_free(batch);
+
+        // d// printf("COMPLETE SEQUENCE p0=%d, p1=%d, size=%d\n", seq->p0,
+        // seq->p1, seq->tokens.size());
+
+        int gen_count = 0;
+        while (n_remain > 0) {
+            gen_count += 1;
+
+            float *logits = llama_get_logits_ith(*g_ctx, sample_idx);
+
+            std::vector<llama_token_data> cur;
+            const int n_vocab = llama_n_vocab(*g_model);
+            for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+                cur.emplace_back(
+                    llama_token_data{token_id, logits[token_id], 0.0f});
+            }
+
+            llama_token_data_array candidates_p = {
+                cur.data(), cur.size(), false};
+
+            std::string seq_str = seq->recent_string();
+            bool end = false;
+            llama_token tok = sample(candidates_p, seq_str, end);
+            if (tok == llama_token_eos(*g_model)) {
+                return true;
+            }
+            if (end) {
+                return true;
+            }
+
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+
+            seq->add_token(tok);
+
+            auto one_batch = llama_batch_init(tokens.size(), 0, 1);
+
+            llama_batch_add(one_batch, tok, seq->p1 - 1, {seq->seq_id}, true);
+            if (llama_decode(*g_ctx, one_batch)) {
+                fprintf(stderr, "%s : failed to eval\n", __func__);
+                llama_batch_free(one_batch);
+                return false;
+            }
+            sample_idx = 0;
+            llama_batch_free(one_batch);
+        }
+
+        return true;
+    }
+
+    std::string get_sequence_text_no_prev(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return "";
+        }
+        Sequence *seq = &sequences[sidx];
+
+        return seq->to_string();
+    }
+
+    int get_sequence_token_count(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return 0;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        return (int)seq->tokens.size();
     }
 
     std::string get_sequence_text(const std::string &name) {
@@ -732,77 +862,6 @@ struct Inference {
     }
 };
 
-struct TokenVec {
-    llama_pos p0;
-    llama_pos p1;
-    std::vector<llama_token> tokens;
-    bool decoded;
-
-    TokenVec() : p0(0), p1(0), decoded(false) {}
-    TokenVec(const std::string &prompt) : p0(0), p1(0), decoded(false) {
-        load_as_mid(prompt);
-    }
-
-    TokenVec spawn_continuation() {
-        TokenVec tv;
-        if (tokens.size() > 0) {
-            tv.tokens.push_back(tokens.back());
-        }
-        tv.p0 = p1;
-        tv.p1 = p1;
-        return tv;
-    }
-
-    void append(llama_token id) { tokens.push_back(id); }
-    void append(TokenVec &other_vec) {
-        for (auto tok : other_vec.tokens) {
-            tokens.push_back(tok);
-        }
-        p1 = other_vec.p1;
-    }
-
-    std::string to_string() {
-        std::string p;
-        for (auto tok : tokens) {
-            p += llama_token_to_piece(*g_ctx, tok);
-        }
-        return p;
-    }
-
-    void print() {
-        std::string p;
-        for (auto tok : tokens) {
-            p += llama_token_to_piece(*g_ctx, tok);
-        }
-        printf("### tokens=[%s]\n", p.c_str());
-    }
-
-    void print_last() {
-        std::string p = llama_token_to_piece(*g_ctx, get_last());
-        printf("### last_token=[%s]\n", p.c_str());
-    }
-
-    llama_token get_last() {
-        if (tokens.size() > 0) {
-            return tokens[tokens.size() - 1];
-        }
-        return 0;
-    }
-
-    void load_as_bos(const std::string &prompt) {
-        const bool add_bos = llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM;
-        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), add_bos, true);
-        // d// printf("TOKENIZE BOS[%s]\n", prompt.c_str());
-    }
-
-    void load_as_mid(const std::string &prompt) {
-        tokens = ::llama_tokenize(*g_ctx, prompt.c_str(), false, true);
-        // d// printf("TOKENIZE MID[%s]\n", prompt.c_str());
-    }
-
-    size_t size() { return tokens.size(); }
-};
-
 struct StopSequences {
     json stop_sequences;
 
@@ -834,6 +893,8 @@ struct Conversation {
 
     std::string char_next_fmt;
     std::string user_next_fmt;
+    int user_next_tok;
+    int char_next_tok;
 
     json char_cfg;
     json user_cfg;
@@ -845,7 +906,7 @@ struct Conversation {
     Conversation(TextReplacer repl, StopSequences ss, json test_replacement)
         : replacer(repl), stop_seq(ss), test_replacements(test_replacement) {}
 
-    bool load_config(json chat) {
+    bool load_config(json chat, int n_predict_default) {
         if (chat.contains("user")) {
             user_cfg = chat["user"];
         } else {
@@ -871,6 +932,8 @@ struct Conversation {
             test_replacements, user_cfg.value("next_fmt", ""));
         char_next_fmt = replacer.apply_replacements(
             test_replacements, char_cfg.value("next_fmt", ""));
+        user_next_tok = user_cfg.value("n_gen", n_predict_default);
+        char_next_tok = user_cfg.value("n_gen", n_predict_default);
         printf("FOFO %s\n", user_prompt.c_str());
 
         std::string char_log_init = chat.value("char_log_init", "");
@@ -887,6 +950,10 @@ struct Conversation {
 
     std::string next_completion_fmt(bool is_user) {
         return is_user ? user_next_fmt : char_next_fmt;
+    }
+
+    int next_completion_tok_count(bool is_user) {
+        return is_user ? user_next_tok : char_next_tok;
     }
 
     std::string append_raw_chat_response(bool is_user,
@@ -910,6 +977,14 @@ struct Conversation {
     std::string chatlog_text() { return concatl(chatlog); }
 
     std::string chatlog_text_ext() { return concatl(chatlog, true); }
+
+    json chatlog_as_json() {
+        json log;
+        for (auto l : chatlog) {
+            log.push_back(l);
+        }
+        return log;
+    }
 
     void log_chatlog_to_file(int seed,
                              const std::string &model_file,
@@ -948,532 +1023,20 @@ struct Conversation {
     }
 };
 
-struct Decoder {
-    struct llama_sampling_context *ctx_sampling;
-
-    Decoder(const llama_sampling_params &sparams) {
-        ctx_sampling = llama_sampling_init(sparams);
-    }
-
-    void init() { llama_kv_cache_clear(*g_ctx); }
-
-    void reset_seed(int seed) {
-        //        printf("RESET SEED %d\n", seed);
-        llama_set_rng_seed(*g_ctx, seed);
-    }
-
-    void refeed_tokens_for_sampling(TokenVec &tokens) {
-        printf("REFEED[p0=%d,p1=%d,size=%ld][%s]\n",
-               tokens.p0,
-               tokens.p1,
-               tokens.size(),
-               tokens.to_string().c_str());
-        llama_sampling_reset(ctx_sampling);
-        for (auto tok : tokens.tokens) {
-            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-        }
-    }
-
-    llama_token sample(int idx) {
-        // printf("SAMPLE IDX=%d\n", idx);
-        const llama_token id =
-            llama_sampling_sample(ctx_sampling, *g_ctx, NULL, idx);
-        return id;
-    }
-
-    bool decode_to_cache(TokenVec &tokens, llama_pos p0, llama_seq_id seq_id) {
-        llama_batch batch;
-
-        batch = llama_batch_init(tokens.size(), 0, 1);
-        int i = 0;
-        // tokens.print();
-        printf("### batch seq_id=%d, p0=%d to p1=%ld\n",
-               seq_id,
-               p0,
-               p0 + tokens.size());
-        for (auto tok : tokens.tokens) {
-            llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
-            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-            i++;
-        }
-
-        bool ok = false;
-        if (llama_decode(*g_ctx, batch) != 0) {
-            LOG_TEE("%s: llama_decode() failed\n", __func__);
-            ok = false;
-        } else {
-            tokens.p0 = p0;
-            tokens.p1 = p0 + i;
-            ok = true;
-        }
-
-        llama_batch_free(batch);
-
-        return ok;
-    }
-
-    bool decode(TokenVec &tokens,
-                bool only_last_token,
-                llama_pos p0,
-                llama_seq_id seq_id) {
-        llama_batch batch;
-
-        if (only_last_token) {
-            batch = llama_batch_init(1, 0, 1);
-            // d// printf("### batch seq_id=%d, p0=%d\n", seq_id, p0);
-            // d// tokens.print_last();
-            llama_batch_add(batch, tokens.get_last(), p0, {seq_id}, true);
-            llama_sampling_accept(
-                ctx_sampling, *g_ctx, tokens.get_last(), true);
-            tokens.p0 = p0;
-            tokens.p1 = p0 + 1;
-
-        } else {
-            batch = llama_batch_init(tokens.size(), 0, 1);
-            int i = 0;
-            //            tokens.print();
-            // printf("### batch seq_id=%d, p0=%d to p1=%ld\n", seq_id,
-            //        p0, p0 + tokens.size());
-            for (auto tok : tokens.tokens) {
-                llama_batch_add(batch, tok, p0 + i, {seq_id}, false);
-                llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-                i++;
-            }
-            batch.logits[batch.n_tokens - 1] = true;
-
-            tokens.p0 = p0;
-            tokens.p1 = p0 + i;
-        }
-
-        bool ok = false;
-        if (llama_decode(*g_ctx, batch) != 0) {
-            LOG_TEE("%s: llama_decode() failed\n", __func__);
-        } else {
-            tokens.decoded = true;
-            ok = true;
-
-            tokens.append(sample(batch.n_tokens - 1));
-        }
-
-        llama_batch_free(batch);
-
-        return ok;
-    }
-};
-
-int prompt_piece_seq_id = 0;
-
-struct SystemPrompt {
-    llama_pos p0;
-    llama_seq_id seq_id;
-    TokenVec tokens;
-
-    SystemPrompt(const std::string &prompt) : p0(0) {
-        seq_id = prompt_piece_seq_id++;
-        tokens.load_as_bos(prompt);
-    }
-
-    bool decode(Decoder &decoder) {
-        return decoder.decode_to_cache(tokens, p0, seq_id);
-    }
-
-    std::string to_string() { return tokens.to_string(); }
-
-    llama_pos get_p1() { return tokens.p1; }
-};
-
-struct PromptPiece {
-    llama_pos p0;
-    llama_seq_id seq_id;
-    TokenVec tokens;
-
-    void load_as_mid(const std::string &prompt) {
-        p0 = 0;
-        seq_id = 0;
-        tokens.load_as_mid(prompt);
-    }
-
-    llama_pos get_p0() { return tokens.p0; }
-    llama_pos get_p1() { return tokens.p1; }
-
-    void shift_to(llama_pos new_p0, llama_seq_id new_seq_id) {
-        llama_pos offs = new_p0 - tokens.p0;
-
-        llama_kv_cache_seq_cp(*g_ctx, seq_id, new_seq_id, tokens.p0, tokens.p1);
-        llama_kv_cache_seq_shift(
-            *g_ctx, new_seq_id, tokens.p0, tokens.p1, offs);
-
-        seq_id = new_seq_id;
-        tokens.p0 = tokens.p0 + offs;
-        tokens.p1 = tokens.p1 + offs;
-        p0 = tokens.p0;
-    }
-
-    bool append(Decoder &decoder, TokenVec &new_tokens) {
-        if (!decoder.decode_to_cache(new_tokens, tokens.p1, seq_id)) {
-            return false;
-        }
-        printf("appended tokens p0=%d, p1=%d\n", new_tokens.p0, new_tokens.p1);
-
-        tokens.append(new_tokens);
-
-        return true;
-    }
-
-    bool decode_to_cache(Decoder &decoder, llama_pos p0, llama_seq_id sid) {
-        seq_id = sid;
-
-        if (!decoder.decode_to_cache(tokens, p0, seq_id)) {
-            return false;
-        }
-
-        return true;
-    }
-
-    bool complete(Decoder &decoder,
-                  StopSequences &stop_seq,
-                  const std::string &next_piece,
-                  int n_tokens,
-                  std::string &output) {
-        int pre_usage = llama_kv_cache_usage(**g_ctx);
-
-        decoder.refeed_tokens_for_sampling(tokens);
-
-        TokenVec leader_tokens(next_piece);
-
-        //  printf("START! [%s]\n", leader_tokens.to_string().c_str());
-        if (!decoder.decode(leader_tokens, false, tokens.p1, seq_id)) {
-            return false;
-        }
-        printf("LEADER[p0=%d,p1=%d,size=%ld][%s]\n",
-               leader_tokens.p0,
-               leader_tokens.p1,
-               leader_tokens.size(),
-               leader_tokens.to_string().c_str());
-
-        TokenVec new_tokens = leader_tokens.spawn_continuation();
-
-        // printf("MID! [%s]\n", new_tokens.to_string().c_str());
-        while (n_tokens > 0) {
-            //            printf("NEW[p0=%d,p1=%d][%s]\n", new_tokens.p0,
-            //            new_tokens.p1,
-            //                   new_tokens.to_string().c_str());
-            if (new_tokens.size() > 0 &&
-                new_tokens.tokens.back() == llama_token_eos(*g_model)) {
-                // printf("got EOS\n");
-                break;
-            }
-
-            std::string generated = new_tokens.to_string();
-            std::string _out;
-            if (stop_seq.trim_stop_sequence(generated, _out)) {
-                // printf("got STOPSEQ\n");
-                break;
-            }
-
-            if (!decoder.decode(new_tokens, true, new_tokens.p1, seq_id)) {
-                printf("ERROR?!?\n");
-                return false;
-            }
-
-            n_tokens--;
-        }
-
-        // int pre_usage = llama_kv_cache_usage(**g_ctx);
-
-        output = new_tokens.to_string();
-        // printf("SETOUT:[%s]\n", output.c_str());
-
-        // tokens.p0 is the beginning of the completion, including the leading
-        // prompt new_tokens.p1 is the end of the generated tokens, pointing
-        // towards the next token.
-        llama_kv_cache_seq_rm(*g_ctx, seq_id, tokens.p1, new_tokens.p1);
-
-        int post_usage = llama_kv_cache_usage(**g_ctx);
-        if (post_usage != pre_usage) {
-            printf("PREPOST DIFF=%d (%d)\n", pre_usage - post_usage, pre_usage);
-        }
-        assert(pre_usage == post_usage);
-        //  printf("OUTPUT! %d|%d %d,%d => %d [%s]\n", tokens.p1, tokens.p1 +
-        //  new_tokens.size(), pre_usage1, pre_usage, post_usage,
-        //         output.c_str());
-
-        return true;
-    }
-};
-
-struct DualPrefixPrompt {
-    SystemPrompt prefix1;
-    SystemPrompt prefix2;
-    bool is_at_prefix1;
-    PromptPiece mid_piece;
-
-    DualPrefixPrompt(const std::string &prefix1, const std::string &prefix2)
-        : prefix1(prefix1), prefix2(prefix2), is_at_prefix1(true) {}
-
-    void set_mid_piece(const std::string &dyn_prompt_init) {
-        mid_piece.load_as_mid(dyn_prompt_init);
-    }
-
-    bool init_decode(Decoder &decoder) {
-        if (!prefix1.decode(decoder)) return false;
-        if (!prefix2.decode(decoder)) return false;
-
-        int p1 = prefix1.get_p1();
-        is_at_prefix1 = true;
-        return mid_piece.decode_to_cache(decoder, p1, prefix1.seq_id);
-    }
-
-    void use_prefix1() {
-        printf("USE PREFIX1(p1=%d)[%s]\n",
-               prefix1.get_p1(),
-               prefix1.tokens.to_string().c_str());
-        if (!is_at_prefix1) {
-            mid_piece.shift_to(prefix1.get_p1(), prefix1.seq_id);
-            is_at_prefix1 = true;
-        }
-    }
-
-    void use_prefix2() {
-        printf("USE PREFIX2(p1=%d)[%s]\n",
-               prefix2.get_p1(),
-               prefix2.tokens.to_string().c_str());
-        if (is_at_prefix1) {
-            mid_piece.shift_to(prefix2.get_p1(), prefix2.seq_id);
-            is_at_prefix1 = false;
-        }
-    }
-
-    size_t prompt_length() {
-        size_t len = prefix1.tokens.size();
-        if (prefix2.tokens.size() > len) len = prefix2.tokens.size();
-        len += mid_piece.tokens.size();
-        return len;
-    }
-
-    bool feed_mid_piece(Decoder &decoder, const std::string &mid) {
-        TokenVec new_tokens(mid);
-        return mid_piece.append(decoder, new_tokens);
-    }
-
-    bool complete(Decoder &decoder,
-                  StopSequences &stop_seq,
-                  const std::string &add_prompt,
-                  int n_tokens,
-                  std::string &output) {
-        return mid_piece.complete(
-            decoder, stop_seq, add_prompt, n_tokens, output);
-    }
-};
-
-struct PromptProcessor {
-    std::vector<llama_token> embd;
-    std::vector<llama_token> embd_gen;
-    json stop_sequences;
-    int n_past;
-    int n_batch;
-    struct llama_sampling_context *ctx_sampling;
-    int last_response_tok_count;
-    std::string last_raw_response;
-    bool broken_rep_pen;
-
-    PromptProcessor(int batch,
-                    struct llama_sampling_context *ctxs,
-                    json prompt_runner_conf)
-        : n_past(0),
-          n_batch(batch),
-          ctx_sampling(ctxs),
-          last_response_tok_count(0),
-          broken_rep_pen(false) {
-        init();
-        get_stop_sequences(prompt_runner_conf);
-    }
-
-    void set_broken_rep_pen() {
-        // due to a bug in the ERP3 benchmark run only the prompt
-        // was added to repetition penalty. For backward compat we provide this.
-        broken_rep_pen = true;
-    }
-
-    void get_stop_sequences(json prompt_runner_conf) {
-        if (prompt_runner_conf.find("stop_sequences") !=
-            prompt_runner_conf.end()) {
-            stop_sequences = prompt_runner_conf["stop_sequences"];
-        }
-    }
-
-    void init() { llama_kv_cache_clear(*g_ctx); }
-
-    void add_tokens(TokenVec &tokens) { add_tokens(tokens.tokens); }
-
-    void add_tokens(const std::vector<llama_token> &tokens) {
-        for (auto tok : tokens) {
-            embd.push_back(tok);
-            llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
-        }
-    }
-
-    bool generate_tokens(int n_remain) {
-        while (n_remain > 0) {
-            if (!this->process_tokens()) {
-                return true;
-            }
-
-            llama_token id =
-                llama_sampling_sample(ctx_sampling, *g_ctx, nullptr);
-
-            this->add_generated(id);
-            --n_remain;
-
-            if (this->reached_eos()) {
-                break;
-            }
-
-            if (this->reached_stop_sequence()) {
-                n_remain = 0;
-                break;
-            }
-        }
-
-        return true;
-    }
-
-    void add_token(llama_token t) {
-        // push the prompt in the sampling context in order
-        // to apply repetition penalties later for the
-        // prompt, we don't apply grammar rules
-        embd.push_back(t);
-        if (!broken_rep_pen) {
-            llama_sampling_accept(ctx_sampling, *g_ctx, t, false);
-        }
-    }
-
-    void add_generated(llama_token t) {
-        add_token(t);
-        embd_gen.push_back(t);
-    }
-
-    bool reached_eos() {
-        if (!embd.empty() && embd.back() == llama_token_eos(*g_model)) {
-            // fprintf(stderr, " [end of text]\n");
-            return true;
-        }
-
-        return false;
-    }
-
-    int get_last_response_token_count() { return last_response_tok_count; }
-
-    std::string get_response(bool without_stop_seq = false,
-                             bool trim_trailing = false) {
-        last_response_tok_count = 0;
-        std::string gen = "";
-        for (auto id : embd_gen) {
-            last_response_tok_count += 1;
-            gen += llama_token_to_piece(*g_ctx, id);
-        }
-        last_raw_response = gen;
-
-        rtrim_nl(gen);
-
-        if (without_stop_seq) {
-            for (const auto &matched : stop_sequences) {
-                size_t stop_pos = gen.find(matched);
-                if (stop_pos != std::string::npos) {
-                    gen = gen.substr(0, stop_pos);
-                    break;
-                }
-            }
-        }
-
-        if (trim_trailing) {
-            gen = std::regex_replace(
-                gen, std::regex("\n\n\n*", std::regex::extended), "\n");
-            gen = std::regex_replace(
-                gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
-            gen = std::regex_replace(
-                gen, std::regex("\\*\\*\\**", std::regex::extended), "");
-            gen =
-                std::regex_replace(gen,
-                                   std::regex("(.*[.!?*\")}`$])[^.!?*\")}`$]*",
-                                              std::regex::extended),
-                                   "$1");
-        }
-
-        return gen;
-    }
-
-    bool reached_stop_sequence() {
-        std::string generated = "";
-        for (auto id : embd_gen) {
-            generated += llama_token_to_piece(*g_ctx, id);
-        }
-
-        for (const auto &matched : stop_sequences) {
-            if (generated.find(matched) != std::string::npos) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    bool process_tokens() {
-        const int n_ctx = llama_n_ctx(*g_ctx);
-
-        if (embd.size() <= 0) {
-            return true;
-        }
-
-        // Note: n_ctx - 4 here is to match the logic for
-        // commandline prompt handling via
-        // --prompt or --file which uses the same value.
-        auto max_embd_size = n_ctx - 4;
-        // Ensure the input doesn't exceed the context size by
-        // truncating embd if necessary.
-        if ((int)embd.size() > max_embd_size) {
-            auto skipped_tokens = embd.size() - max_embd_size;
-            printf("<<input too long: skipped %zu token%s>>",
-                   skipped_tokens,
-                   skipped_tokens != 1 ? "s" : "");
-            fflush(stdout);
-            embd.resize(max_embd_size);
-        }
-
-        // evaluate tokens in batches
-        // embd is typically prepared beforehand to fit within a
-        // batch, but not always
-        for (int i = 0; i < (int)embd.size(); i += n_batch) {
-            int n_eval = (int)embd.size() - i;
-            if (n_eval > n_batch) {
-                n_eval = n_batch;
-            }
-            if (llama_decode(
-                    *g_ctx, llama_batch_get_one(&embd[i], n_eval, n_past, 0))) {
-                fprintf(stderr, "%s : failed to eval\n", __func__);
-                return false;
-            }
-            n_past += n_eval;
-        }
-
-        embd.clear();
-
-        return true;
-    }
-};
+void record_token_info(std::vector<std::string> &responses,
+                       json &j_tok_resps,
+                       PromptRunContext &prc,
+                       struct llama_sampling_context *ctx_sampling,
+                       int sample_idx);
 
 void record_token_info(std::vector<std::string> &responses,
                        json &j_tok_resps,
                        PromptRunContext &prc,
-                       struct llama_sampling_context *ctx_sampling);
-
-void record_token_info(std::vector<std::string> &responses,
-                       json &j_tok_resps,
-                       PromptRunContext &prc,
-                       struct llama_sampling_context *ctx_sampling) {
+                       struct llama_sampling_context *ctx_sampling,
+                       int sample_idx) {
     const int n_vocab = llama_n_vocab(*g_model);
 
-    float *logits = llama_get_logits_ith(*g_ctx, 0);
+    float *logits = llama_get_logits_ith(*g_ctx, sample_idx);
 
     std::vector<llama_token_data> cur;
     for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
@@ -1609,19 +1172,30 @@ bool chatlog_has_repetitions(const std::vector<std::string> &chatlog,
 //   "char_log_init": "Arias character and scenario
 //   described here.", "turns": 50
 // },
-bool chat_log_generator(gpt_params &params,
-                        Inference &infer,
-                        int seed_value,
-                        TextReplacer &replacer,
-                        json prompt_runner_conf,
-                        json prompt_test) {
+bool chatlog_generator(PromptRunContext &prun_ctx,
+                       gpt_params &params,
+                       Inference &infer,
+                       TextReplacer &replacer,
+                       json prompt_runner_conf,
+                       json prompt_test,
+                       json j_resps,
+                       std::vector<std::string> &responses);
+
+bool chatlog_generator(PromptRunContext &prun_ctx,
+                       gpt_params &params,
+                       Inference &infer,
+                       TextReplacer &replacer,
+                       json prompt_runner_conf,
+                       json prompt_test,
+                       json j_resps,
+                       std::vector<std::string> &responses) {
     StopSequences stop_seq;
     if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
         stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
     }
 
     Conversation conversation(replacer, stop_seq, prompt_test);
-    conversation.load_config(prompt_test["chat"]);
+    conversation.load_config(prompt_test["chat"], params.n_predict);
 
     if (!infer.add_start("user", conversation.user_prompt)) {
         fprintf(stderr, "Couldn't add_start user prompt\n");
@@ -1643,6 +1217,8 @@ bool chat_log_generator(gpt_params &params,
 
     bool is_user = true;
     std::string end_reason;
+
+    json raw_chatlog;
 
     for (int i = 0; i < 50; i++) {
         printf("SEQ[log %d]=%s\n",
@@ -1668,16 +1244,18 @@ bool chat_log_generator(gpt_params &params,
             }
         }
 
-        infer.reset_seed(seed_value + i);
+        infer.reset_seed(prun_ctx.seed + i);
         infer.reset_sampler("log");
 
         std::string completion_start =
             conversation.next_completion_fmt(is_user);
+        int completion_token_cnt =
+            conversation.next_completion_tok_count(is_user);
 
         if (!infer.complete("log",
                             completion_start,
-                            70,
-                            [&](int cnt, const std::string &comp) {
+                            completion_token_cnt,
+                            [&](int, const std::string &comp) {
                                 std::string tr;
                                 return stop_seq.trim_stop_sequence(
                                     comp.substr(completion_start.size()), tr);
@@ -1689,6 +1267,7 @@ bool chat_log_generator(gpt_params &params,
             break;
         }
         std::string completion = infer.get_recently_added_tokens_str("log");
+        raw_chatlog.push_back(completion);
         completion = completion.substr(completion_start.size());
         infer.rewind("log");
 
@@ -1715,7 +1294,21 @@ bool chat_log_generator(gpt_params &params,
     std::string model_file = params.model.c_str();
     model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
     conversation.log_chatlog_to_file(
-        seed_value, model_file, prompt_test, sparams);
+        prun_ctx.seed, model_file, prompt_test, sparams);
+
+    json prompt_collection;
+    prompt_collection["char"] = infer.get_sequence_text("user");
+    prompt_collection["user"] = infer.get_sequence_text("char");
+    prompt_collection["chatlog"] = conversation.chatlog_as_json();
+    prompt_collection["raw_chatlog"] = raw_chatlog;
+    prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
+    prompt_collection["end_reason"] = end_reason;
+
+    j_resps.push_back(make_response(responses,
+                                    prun_ctx,
+                                    infer.get_sequence_text_no_prev("log"),
+                                    infer.get_sequence_token_count("log"),
+                                    prompt_collection));
 
     return true;
 }
@@ -1972,69 +1565,18 @@ int main(int argc, char **argv) {
                 } else if (prompt_test.find("chat") != prompt_test.end()) {
                     Inference infer(sparams, params.n_batch);
 
-                    if (!chat_log_generator(params,
-                                            infer,
-                                            seed_value,
-                                            replacer,
-                                            prompt_runner_conf,
-                                            prompt_test)) {
+                    if (!chatlog_generator(prun_ctx,
+                                           params,
+                                           infer,
+                                           replacer,
+                                           prompt_runner_conf,
+                                           prompt_test,
+                                           j_resps,
+                                           responses)) {
                         return 1;
                     }
 
-                } else {
-                    struct llama_sampling_context *ctx_sampling =
-                        llama_sampling_init(sparams);
-
-                    PromptProcessor proc(
-                        params.n_batch, ctx_sampling, prompt_runner_conf);
-                    if (prompt_test.value("broken_rep_pen", false)) {
-                        proc.set_broken_rep_pen();
-                    }
-                    proc.add_tokens(embd_inp);
-
-                    int n_remain = params.n_predict;
-                    while (n_remain > 0) {
-                        if (!proc.process_tokens()) {
-                            return 1;
-                        }
-
-                        if (record_next_token_info) {
-                            record_token_info(
-                                responses, j_tok_resps, prun_ctx, ctx_sampling);
-                        }
-
-                        llama_token id = 0;
-                        if (sample_seeds.size() > 0) {
-                            id = generate_sample_seeded(responses,
-                                                        j_resps,
-                                                        sample_seeds,
-                                                        prun_ctx,
-                                                        ctx_sampling);
-                        } else {
-                            id = llama_sampling_sample(
-                                ctx_sampling, ctx, nullptr);
-                        }
-
-                        proc.add_generated(id);
-                        --n_remain;
-
-                        if (proc.reached_eos()) {
-                            break;
-                        }
-
-                        if (proc.reached_stop_sequence()) {
-                            n_remain = 0;
-                            break;
-                        }
-                    }
-
-                    std::string gen = proc.get_response();
-                    int gen_tok_cnt = proc.get_last_response_token_count();
-
-                    j_resps.push_back(make_response(
-                        responses, prun_ctx, gen, gen_tok_cnt, json()));
-
-                    llama_sampling_free(ctx_sampling);
+                } else if (prompt_test.find("chat") != prompt_test.end()) {
                 }
 
                 first = false;
