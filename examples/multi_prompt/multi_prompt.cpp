@@ -32,42 +32,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // number of parallel batches
-    int n_parallel = 1;
-
-    // total length of the sequences including the prompt
-    int n_len = 32;
-
-    // number of layers to offload to the GPU
-    int n_gpu_layers = 0;
-
     if (argc >= 2) {
         params.model = argv[1];
     }
 
-    int order1 = 0;
+    int decode_order_batch2_first = 0;
     if (argc >= 3) {
         std::string s = argv[2];
         if (s == "1")
-            order1 = 1;
+            decode_order_batch2_first = 1;
         else
-            order1 = 0;
-    }
-
-    if (argc >= 4) {
-        n_parallel = std::atoi(argv[3]);
-    }
-
-    if (argc >= 5) {
-        n_len = std::atoi(argv[4]);
-    }
-
-    if (argc >= 6) {
-        n_gpu_layers = std::atoi(argv[5]);
-    }
-
-    if (params.prompt.empty()) {
-        params.prompt = "Hello my name is";
+            decode_order_batch2_first = 0;
     }
 
     // init LLM
@@ -77,8 +52,6 @@ int main(int argc, char **argv) {
     // initialize the model
 
     llama_model_params model_params = llama_model_default_params();
-
-    model_params.n_gpu_layers = n_gpu_layers;
 
     llama_model *model =
         llama_load_model_from_file(params.model.c_str(), model_params);
@@ -111,12 +84,13 @@ int main(int argc, char **argv) {
 
     g_ctx = &ctx;
 
-    // tokenize the 2 prompts
+    // tokenize the first prompt for sequence id=0
     int seq_prompt1 = 0;
     auto batch1 = make_token_batch("The quick fast brown and yellow fox jumps",
                                    seq_prompt1);
     int batch1_len = batch1.n_tokens;
 
+    // tokenize the second prompt for sequence id=1
     int seq_prompt2 = 1;
     auto batch2 = make_token_batch(
         "XIFDEIFEIFE IFWIO FWFIEWJHFO IWEJFOI WEJF OEWJF OEIWFJ EWOI EWJ OEWIF "
@@ -125,7 +99,7 @@ int main(int argc, char **argv) {
         300);
     int batch2_len = batch2.n_tokens;
 
-    if (order1) {
+    if (decode_order_batch2_first) {
         // load sequence id=1 with [p0=300, p1=386)
         if (llama_decode(ctx, batch2)) {
             fprintf(stderr, "%s : failed to eval\n", __func__);
