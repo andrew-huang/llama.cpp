@@ -10,7 +10,7 @@ Inference of [LLaMA](https://arxiv.org/abs/2302.13971) model in pure C/C++
 
 ### Hot topics
 
-- ⚠️ **Upcoming change that might break functionality. Help with testing is needed:** https://github.com/ggerganov/llama.cpp/pull/3912
+- *No hot topics atm. Open to suggestions about what is hot today*
 
 ----
 
@@ -93,6 +93,7 @@ as the main playground for developing new features for the [ggml](https://github
 - [X] [Persimmon 8B](https://github.com/ggerganov/llama.cpp/pull/3410)
 - [X] [MPT](https://github.com/ggerganov/llama.cpp/pull/3417)
 - [X] [Bloom](https://github.com/ggerganov/llama.cpp/pull/3553)
+- [X] [StableLM-3b-4e1t](https://github.com/ggerganov/llama.cpp/pull/3586)
 
 
 **Bindings:**
