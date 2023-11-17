@@ -394,7 +394,12 @@ struct Inference {
         // for rewinding
         int recent_add_tokens;
 
-        Sequence() : p0(0), p1(0), seq_id(0), rebase_seq_id(-1), recent_add_tokens(0) {}
+        Sequence()
+            : p0(0),
+              p1(0),
+              seq_id(0),
+              rebase_seq_id(-1),
+              recent_add_tokens(0) {}
 
         void commit() { recent_add_tokens = 0; }
 
@@ -577,32 +582,41 @@ struct Inference {
 
         Sequence *src = &sequences[sidx];
         Sequence *dest = &sequences[dest_idx];
-        printf("REBASE %d onto %d\n", src->seq_id, dest->seq_id);
+        printf("REBASE [%s]seq=%d [%d-%d) onto [%s]seq=%d [%d-%d)\n",
+               src->name.c_str(),
+               src->seq_id,
+               src->p0,
+               src->p1,
+               dest->name.c_str(),
+               dest->seq_id,
+               dest->p0,
+               dest->p1);
 
+        llama_kv_cache_debug_print(*g_ctx, "bef_reb");
         if (src->rebase_seq_id < 0) {
             src->rebase_seq_id = src->seq_id;
         } else {
-            llama_kv_cache_debug_print(*g_ctx, "pre_copy");
+            //            llama_kv_cache_debug_print(*g_ctx, "pre_copy");
             llama_kv_cache_seq_cp(
                 *g_ctx, src->seq_id, src->rebase_seq_id, src->p0, src->p1);
             llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
             src->seq_id = src->rebase_seq_id;
         }
 
-
-        llama_kv_cache_debug_print(*g_ctx, "before");
+        //        llama_kv_cache_debug_print(*g_ctx, "before");
         int offs = dest->p1 - src->p0;
         llama_kv_cache_seq_shift(*g_ctx, src->seq_id, src->p0, src->p1, offs);
-        llama_kv_cache_debug_print(*g_ctx, "aft_shift");
+        //        llama_kv_cache_debug_print(*g_ctx, "aft_shift");
         src->p0 += offs;
         src->p1 += offs;
         src->prev_name = new_prev;
 
         llama_kv_cache_seq_cp(
             *g_ctx, src->seq_id, dest->seq_id, src->p0, src->p1);
-        llama_kv_cache_debug_print(*g_ctx, "aft_cp");
+        //        llama_kv_cache_debug_print(*g_ctx, "aft_cp");
         llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
-        llama_kv_cache_debug_print(*g_ctx, "after");
+        //        llama_kv_cache_debug_print(*g_ctx, "after");
+        llama_kv_cache_debug_print(*g_ctx, "aft_reb");
 
         src->seq_id = dest->seq_id;
 
@@ -638,21 +652,24 @@ struct Inference {
         int sample_idx = tokens.size() - 1;
 
         if (llama_decode(*g_ctx, batch)) {
-            fprintf(stderr, "%s : failed to eval\n", __func__);
+            fprintf(
+                stderr, "%s [%s]: failed to eval\n", __func__, text.c_str());
             llama_batch_free(batch);
             return false;
         }
 
         llama_batch_free(batch);
 
-        printf("COMPLETE SEQUENCE[%s: %s] seq_id=%d, p0=%d, p1=%d, size=%d, n_gen=%d\n",
-               seq->name.c_str(),
-               text.c_str(),
-               seq->seq_id,
-               seq->p0,
-               seq->p1,
-               (int) seq->tokens.size(),
-               n_remain);
+        printf(
+            "COMPLETE SEQUENCE[%s: %s] seq_id=%d, p0=%d, p1=%d, size=%d, "
+            "n_gen=%d\n",
+            seq->name.c_str(),
+            text.c_str(),
+            seq->seq_id,
+            seq->p0,
+            seq->p1,
+            (int)seq->tokens.size(),
+            n_remain);
 
         int gen_count = 0;
         while (n_remain > 0) {
@@ -826,9 +843,11 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
+        llama_kv_cache_debug_print(*g_ctx, "bef_rewind");
         if (seq->recent_add_tokens > 0) {
             seq->rewind();
         }
+        llama_kv_cache_debug_print(*g_ctx, "aft_rewind");
 
         return true;
     }
@@ -914,6 +933,8 @@ struct Conversation {
     int user_next_tok;
     int char_next_tok;
 
+    int turns;
+
     json char_cfg;
     json user_cfg;
 
@@ -944,15 +965,17 @@ struct Conversation {
                                                   user_cfg.value("prompt", ""));
         char_prompt = replacer.apply_replacements(test_replacements,
                                                   char_cfg.value("prompt", ""));
-        user_log_fmt = user_cfg.value("log_fmt", "");
-        char_log_fmt = char_cfg.value("log_fmt", "");
+        user_log_fmt = user_cfg.value("log_fmt", "<USER>: <RESPONSE>\n");
+        char_log_fmt = char_cfg.value("log_fmt", "<CHAR>: <RESPONSE>\n");
         user_next_fmt = replacer.apply_replacements(
-            test_replacements, user_cfg.value("next_fmt", ""));
+            test_replacements, user_cfg.value("next_fmt", "<USER>:"));
         char_next_fmt = replacer.apply_replacements(
-            test_replacements, char_cfg.value("next_fmt", ""));
+            test_replacements, char_cfg.value("next_fmt", "<CHAR>:"));
         user_next_tok = user_cfg.value("n_gen", n_predict_default);
         char_next_tok = user_cfg.value("n_gen", n_predict_default);
         printf("FOFO %s\n", user_prompt.c_str());
+
+        turns = chat.value("turns", 100);
 
         std::string char_log_init = chat.value("char_log_init", "");
         if (char_log_init.size() > 0) {
@@ -965,6 +988,8 @@ struct Conversation {
 
         return true;
     }
+
+    int chat_turns() { return turns; }
 
     std::string next_completion_fmt(bool is_user) {
         return is_user ? user_next_fmt : char_next_fmt;
@@ -1215,13 +1240,13 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     Conversation conversation(replacer, stop_seq, prompt_test);
     conversation.load_config(prompt_test["chat"], params.n_predict);
 
-    if (!infer.add_start("user", conversation.user_prompt)) {
-        fprintf(stderr, "Couldn't add_start user prompt\n");
+    if (!infer.add_start("char", conversation.char_prompt)) {
+        fprintf(stderr, "Couldn't add_start char prompt\n");
         fflush(stderr);
         return false;
     }
-    if (!infer.add_start("char", conversation.char_prompt)) {
-        fprintf(stderr, "Couldn't add_start char prompt\n");
+    if (!infer.add_start("user", conversation.user_prompt)) {
+        fprintf(stderr, "Couldn't add_start user prompt\n");
         fflush(stderr);
         return false;
     }
@@ -1238,7 +1263,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
 
     json raw_chatlog;
 
-    for (int i = 0; i < 50; i++) {
+    for (int i = 0; i < conversation.chat_turns(); i++) {
         printf("SEQ[log %d]=%s\n",
                infer.current_max_seq_token_count(),
                infer.get_sequence_text("log").c_str());
