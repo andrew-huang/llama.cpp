@@ -384,6 +384,8 @@ struct Inference {
         int p1;
         // kv cache sequence ID
         int seq_id;
+        // sequence ID before rebase
+        int rebase_seq_id;
         // name of this sequence
         std::string name;
         // name of the previous sequence
@@ -392,7 +394,7 @@ struct Inference {
         // for rewinding
         int recent_add_tokens;
 
-        Sequence() : p0(0), p1(0), seq_id(0), recent_add_tokens(0) {}
+        Sequence() : p0(0), p1(0), seq_id(0), rebase_seq_id(-1), recent_add_tokens(0) {}
 
         void commit() { recent_add_tokens = 0; }
 
@@ -576,6 +578,17 @@ struct Inference {
         Sequence *src = &sequences[sidx];
         Sequence *dest = &sequences[dest_idx];
         printf("REBASE %d onto %d\n", src->seq_id, dest->seq_id);
+
+        if (src->rebase_seq_id < 0) {
+            src->rebase_seq_id = src->seq_id;
+        } else {
+            llama_kv_cache_debug_print(*g_ctx, "pre_copy");
+            llama_kv_cache_seq_cp(
+                *g_ctx, src->seq_id, src->rebase_seq_id, src->p0, src->p1);
+            llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
+            src->seq_id = src->rebase_seq_id;
+        }
+
 
         llama_kv_cache_debug_print(*g_ctx, "before");
         int offs = dest->p1 - src->p0;

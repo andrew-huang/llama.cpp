@@ -1631,7 +1631,7 @@ void llama_kv_cache_debug_print(
         }
         if (seqs.size() > 0) {
             if ((prev_pos + 1) != cache.cells[i].pos || prev_seqs != seqs) {
-                printf("[%10s| %4d] pos=%4d %5s (switch)\n",
+                printf("[%10s| %4d] pos=%4d %5s\n",
                     tag.c_str(), prev_i, prev_pos, prev_seqs.c_str());
 
                 prev_i = i;
