@@ -1620,6 +1620,7 @@ void llama_kv_cache_debug_print(
     int prev_i = -1;
     std::string prev_seqs;
 
+    printf("[%10s|c.idx]      pos       seq\n", "tag");
     for (uint32_t i = 0; i < cache.size; ++i) {
         if (cache.cells[i].pos < 0)
             continue;
@@ -1631,14 +1632,17 @@ void llama_kv_cache_debug_print(
         }
         if (seqs.size() > 0) {
             if ((prev_pos + 1) != cache.cells[i].pos || prev_seqs != seqs) {
-                printf("[%10s| %4d] pos=%4d %5s\n",
-                    tag.c_str(), prev_i, prev_pos, prev_seqs.c_str());
+                if (prev_i >= 0) {
+                    printf("[%10s|    :]        :         |\n", tag.c_str());
+                    printf("[%10s| %4d] pos=%4d seq=%5s\n",
+                        tag.c_str(), prev_i, prev_pos, prev_seqs.c_str());
+                }
 
                 prev_i = i;
                 prev_pos = cache.cells[i].pos;
                 prev_seqs = seqs;
 
-                printf("[%10s| %4d] pos=%4d %5s\n",
+                printf("[%10s| %4d] pos=%4d seq=%5s\n",
                     tag.c_str(), i, cache.cells[i].pos, seqs.c_str());
             } else if (prev_pos + 1 == cache.cells[i].pos) {
                 prev_pos = cache.cells[i].pos;
@@ -1647,7 +1651,8 @@ void llama_kv_cache_debug_print(
         }
     }
 
-    printf("[%10s| %4d] pos=%4d %5s (end)\n",
+    printf("[%10s|    :]        :         |\n", tag.c_str());
+    printf("[%10s| %4d] pos=%4d seq=%5s (end)\n",
         tag.c_str(), prev_i, prev_pos, prev_seqs.c_str());
 }
 
