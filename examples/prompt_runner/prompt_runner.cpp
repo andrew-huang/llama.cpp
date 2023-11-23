@@ -311,6 +311,8 @@ std::string cleanup_unbalanced(const std::string &str, char quot) {
 std::string trim_generated_chat_response(std::string gen) {
     // Strip extra newlines:
     gen = std::regex_replace(
+        gen, std::regex("^:", std::regex::extended), "");
+    gen = std::regex_replace(
         gen, std::regex("\n\n\n*", std::regex::extended), "\n");
     // gen = std::regex_replace(
     //     gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
@@ -323,7 +325,7 @@ std::string trim_generated_chat_response(std::string gen) {
         "$1");
     gen = cleanup_unbalanced(gen, '*');
     gen = cleanup_unbalanced(gen, '"');
-    rtrim_nl(gen);
+    trim_nl(gen, " \r\n");
     return gen;
 }
 
@@ -474,6 +476,12 @@ struct Inference {
     void reset_seed(int seed) {
         // printf("RESET SEED %d\n", seed);
         llama_set_rng_seed(*g_ctx, seed);
+    }
+
+    void clear() {
+        sequences.clear();
+        llama_kv_cache_clear(*g_ctx);
+        llama_sampling_reset(ctx_sampling);
     }
 
     ~Inference() {
@@ -1003,13 +1011,14 @@ struct Conversation {
                                          const std::string &resp) {
         std::string cleaned;
         stop_seq.trim_stop_sequence(resp, cleaned);
-        //        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
         cleaned = trim_generated_chat_response(cleaned);
 
         trim_nl(cleaned, " \r\n");
+        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
         replacer.add_extra("<RESPONSE>", cleaned);
         std::string entry = replacer.apply_replacements(
             test_replacements, is_user ? user_log_fmt : char_log_fmt);
+            printf("ENTRY:[%s]\n", entry.c_str());
         chatlog.push_back(entry);
 
         // d// printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
@@ -1223,6 +1232,14 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                        json prompt_test,
                        json j_resps,
                        std::vector<std::string> &responses);
+bool chatlog_generator_slow(PromptRunContext &prun_ctx,
+                            gpt_params &params,
+                            Inference &infer,
+                            TextReplacer &replacer,
+                            json prompt_runner_conf,
+                            json prompt_test,
+                            json j_resps,
+                            std::vector<std::string> &responses);
 
 bool chatlog_generator(PromptRunContext &prun_ctx,
                        gpt_params &params,
@@ -1352,6 +1369,130 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                                     infer.get_sequence_text_no_prev("log"),
                                     infer.get_sequence_token_count("log"),
                                     prompt_collection));
+
+    return true;
+}
+
+bool chatlog_generator_slow(PromptRunContext &prun_ctx,
+                            gpt_params &params,
+                            Inference &infer,
+                            TextReplacer &replacer,
+                            json prompt_runner_conf,
+                            json prompt_test,
+                            json j_resps,
+                            std::vector<std::string> &responses) {
+    StopSequences stop_seq;
+    if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
+        stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
+    }
+
+    Conversation conversation(replacer, stop_seq, prompt_test);
+    conversation.load_config(prompt_test["chat"], params.n_predict);
+
+    if (!infer.add_start("char", conversation.char_prompt)) {
+        fprintf(stderr, "Couldn't add_start char prompt\n");
+        fflush(stderr);
+        return false;
+    }
+    if (!infer.add_start("user", conversation.user_prompt)) {
+        fprintf(stderr, "Couldn't add_start user prompt\n");
+        fflush(stderr);
+        return false;
+    }
+
+    if (!infer.append("log", conversation.chatlog_text())) {
+        fprintf(stderr, "Couldn't append chatlog\n");
+        fflush(stderr);
+        return false;
+    }
+
+    bool is_user = true;
+    std::string end_reason;
+
+    json raw_chatlog;
+
+    for (int i = 0; i < conversation.chat_turns(); i++) {
+        printf("SEQ[log %d]=%s\n",
+               infer.current_max_seq_token_count(),
+               infer.get_sequence_text("base_prompt").c_str());
+
+        if (infer.current_max_seq_token_count() > 3900) {
+            end_reason = "context limit reached: 3900";
+            break;
+        }
+
+        infer.clear();
+        if (is_user) {
+            infer.add_start("base_prompt", conversation.user_prompt);
+            infer.append("base_prompt", conversation.chatlog_text());
+
+        } else {
+            infer.add_start("base_prompt", conversation.char_prompt);
+            infer.append("base_prompt", conversation.chatlog_text());
+        }
+        infer.commit("base_prompt");
+
+        infer.reset_seed(prun_ctx.seed + i);
+        infer.reset_sampler("base_prompt");
+
+        std::string completion_start =
+            conversation.next_completion_fmt(is_user);
+        int completion_token_cnt =
+            conversation.next_completion_tok_count(is_user);
+
+        if (!infer.complete("base_prompt",
+                            completion_start,
+                            completion_token_cnt,
+                            [&](int, const std::string &comp) {
+                                std::string tr;
+                                return stop_seq.trim_stop_sequence(
+                                    comp.substr(completion_start.size()), tr);
+                            })) {
+            end_reason = "inference error";
+            fprintf(stderr, "Inference error!\n");
+            fflush(stderr);
+            return false;
+            break;
+        }
+        std::string completion =
+            infer.get_recently_added_tokens_str("base_prompt");
+        printf("COMPLE[%s]\n", completion.c_str());
+        raw_chatlog.push_back(completion);
+        completion = completion.substr(completion_start.size());
+
+        std::string log_entry =
+            conversation.append_raw_chat_response(is_user, completion);
+
+        printf("> %s", log_entry.c_str());
+        if (completion.size() == 0) {
+            end_reason = "empty response";
+            break;
+        }
+
+        is_user = !is_user;
+    }
+
+    llama_sampling_params &sparams = params.sparams;
+
+    std::string model_file = params.model.c_str();
+    model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
+    conversation.log_chatlog_to_file(
+        prun_ctx.seed, model_file, prompt_test, sparams);
+
+    json prompt_collection;
+    prompt_collection["char"] = conversation.char_prompt;
+    prompt_collection["user"] = conversation.user_prompt;
+    prompt_collection["chatlog"] = conversation.chatlog_as_json();
+    prompt_collection["raw_chatlog"] = raw_chatlog;
+    prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
+    prompt_collection["end_reason"] = end_reason;
+
+    j_resps.push_back(
+        make_response(responses,
+                      prun_ctx,
+                      infer.get_sequence_text_no_prev("base_prompt"),
+                      infer.get_sequence_token_count("base_prompt"),
+                      prompt_collection));
 
     return true;
 }
@@ -1608,14 +1749,14 @@ int main(int argc, char **argv) {
                 } else if (prompt_test.find("chat") != prompt_test.end()) {
                     Inference infer(sparams, params.n_batch);
 
-                    if (!chatlog_generator(prun_ctx,
-                                           params,
-                                           infer,
-                                           replacer,
-                                           prompt_runner_conf,
-                                           prompt_test,
-                                           j_resps,
-                                           responses)) {
+                    if (!chatlog_generator_slow(prun_ctx,
+                                                params,
+                                                infer,
+                                                replacer,
+                                                prompt_runner_conf,
+                                                prompt_test,
+                                                j_resps,
+                                                responses)) {
                         return 1;
                     }
 

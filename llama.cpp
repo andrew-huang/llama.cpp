@@ -5158,8 +5158,26 @@ static struct ggml_cgraph * llama_build_graph(
 
                 int32_t * data = (int32_t *) cur->data;
 
+                int next_i = -1;
+                int next_pos = -1;
                 for (int i = 0; i < n_tokens; ++i) {
                     data[i] = batch.pos[i];
+                    if (next_i != i || next_pos != batch.pos[i]) {
+                        if (next_i != -1) {
+                            printf("BATCHPOS i=    :, pos=    :\n", i, data[i]);
+                        }
+                        printf("BATCHPOS i=%5d, pos=%5d\n", i, data[i]);
+                        next_i = i + 1;
+                        next_pos = data[i] + 1;
+                    } else {
+                        next_i++;
+                        next_pos++;
+                    }
+                }
+
+                if ((next_i - 1) != 0) {
+                    printf("BATCHPOS i=    :, pos=    :\n");
+                    printf("BATCHPOS i=%5d, pos=%5d\n", next_i - 1, next_pos - 1);
                 }
             }
 
@@ -5187,15 +5205,32 @@ static struct ggml_cgraph * llama_build_graph(
                 float * data = (float *) cur->data;
                 memset(data, 0, ggml_nbytes(cur));
 
+                printf("KQm: (ne[0])n_kv=%ld, (ne[1])n_tokens=%ld, nb[0]=%d, nb[1]=%d, nbytes=%d\n", n_kv, n_tokens, cur->nb[0], cur->nb[1], ggml_nbytes(cur));
+
                 for (int h = 0; h < 1; ++h) {
                     for (int j = 0; j < n_tokens; ++j) {
                         const llama_pos    pos    = batch.pos[j];
                         const llama_seq_id seq_id = batch.seq_id[j][0];
+                        int prev_mask_ldx = -2;
 
                         for (int i = 0; i < n_kv; ++i) {
                             if (!lctx.kv_self.cells[i].has_seq_id(seq_id) || lctx.kv_self.cells[i].pos > pos) {
-                                data[h*(n_kv*n_tokens) + j*n_kv + i] = -INFINITY;
+                                int ldx = h*(n_kv*n_tokens) + j*n_kv + i;
+                                if ((prev_mask_ldx + 1) != ldx) {
+                                    if (prev_mask_ldx != -2) {
+                                        printf("MASK KVldx     :        |           |\n");
+                                    }
+                                    printf("MASK KVldx=%5d, pos=%3d, seq_id=%3d\n", ldx, pos, seq_id);
+                                    prev_mask_ldx = ldx;
+                                } else {
+                                    prev_mask_ldx++;
+                                }
+                                data[ldx] = -INFINITY;
                             }
+                        }
+                        if (prev_mask_ldx != -2) {
+                            printf("MASK KVldx     :        |           |\n");
+                            printf("MASK KVldx=%5d, pos=%3d, seq_id=%3d\n", prev_mask_ldx, pos, seq_id);
                         }
                     }
                 }

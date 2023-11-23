@@ -84,17 +84,27 @@ int main(int argc, char **argv) {
 
     g_ctx = &ctx;
 
+//
+//it seems to work (work as in: both orders give the same completion) if:
+//- batch1 is 104 tokens, and batch2 is 32 tokens
+//- batch1 is 62 tokens, and batch is 32 tokens 
+//- batch1 is 60 tokens, and batch is 32 tokens 
+//- batch1 is 58 tokens, and batch is 32 tokens 
+
     // tokenize the first prompt for sequence id=0
     int seq_prompt1 = 0;
-    auto batch1 = make_token_batch("The quick fast brown and yellow fox jumps",
+//    auto batch1 = make_token_batch("Add some random text just to have more than 32 tokens in the batch. Add some random text just to have more than 32 tokens in the batch. Add some random text just to have more than 32 tokens in the batch. The quick fast brown and yellow fox jumps",
+    auto batch1 = make_token_batch("101234567890123456780123Add some random text just to have more than 32 tokens in the batch. The quick fast brown and yellow fox jumps",
+//    auto batch1 = make_token_batch("Add some random text just to have more than 32, even more than this maybe not lol or maybe more than 48 tokens are required I guess. The quick fast brown and yellow fox jumps",
                                    seq_prompt1);
     int batch1_len = batch1.n_tokens;
 
     // tokenize the second prompt for sequence id=1
     int seq_prompt2 = 1;
     auto batch2 = make_token_batch(
-        "XIFDEIFEIFE IFWIO FWFIEWJHFO IWEJFOI WEJF OEWJF OEIWFJ EWOI EWJ OEWIF "
-        "EWOF JEWF OEWF EWUUZEZE/E(73874322328387hre8rwUUEUEUE",
+        "XIFDEIFEIFEXIFDEIFEIFEXIFDEIFEIFEXIFDEIFEIFEXIFDEIFEIFE"
+//        "EWOF JEWF OEWF EWUUZEZE/E(73874322328387hre8rwUUEUEUE 923ofiewj ewfoi ewfoi ewfjweo ifwe joifwe jowei weo iwej fiowejf weoi fwejo fiwefjwoqoiwdiwqodqwoqoqwoqoqo qo qoq oo owo wqo doqwi dqwod iqwdio qwjod qwdio qwdjqw uidh qwiud qwd iuqwd wq iuquifew nfewiu ewifu ewn iweu wef weiu fnwei fnweiu fweiu fwe",
+,
         seq_prompt2,
         300);
     int batch2_len = batch2.n_tokens;
@@ -145,7 +155,7 @@ int main(int argc, char **argv) {
     // last token of " the". In the other iterations it's always 0.
     int sample_idx = batch_compl.n_tokens - 1;
 
-    int n_remain = 30;
+    int n_remain = 60;
     int p0_compl = seq0_p1;
     std::string completion;
     while (n_remain-- > 0) {
