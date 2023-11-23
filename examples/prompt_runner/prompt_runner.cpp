@@ -310,8 +310,7 @@ std::string cleanup_unbalanced(const std::string &str, char quot) {
 
 std::string trim_generated_chat_response(std::string gen) {
     // Strip extra newlines:
-    gen = std::regex_replace(
-        gen, std::regex("^:", std::regex::extended), "");
+    gen = std::regex_replace(gen, std::regex("^:", std::regex::extended), "");
     gen = std::regex_replace(
         gen, std::regex("\n\n\n*", std::regex::extended), "\n");
     // gen = std::regex_replace(
@@ -870,6 +869,7 @@ struct Inference {
             s = &sequences[sequences.size() - 1];
             s->seq_id = cur_seq_id++;
         }
+        printf("APPENDING[%s]\n", text.c_str());
 
         // d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
 
@@ -881,10 +881,11 @@ struct Inference {
         for (auto tok : tokens) {
             s->add_token(tok);
         }
-        printf("load tokens seq_id=%d new_p1=%d, seq->p1=%d\n",
+        printf("append to seq_id=%d new_p1=%d, seq->p1=%d [%s]\n",
                s->seq_id,
                new_p1,
-               s->p1);
+               s->p1,
+               s->recent_string().c_str());
         return ok;
     }
 
@@ -967,7 +968,6 @@ struct Conversation {
             fprintf(stderr, "BAD CHAT, NO \"user\" KEY!\n");
             return false;
         }
-        printf("FOFO\n");
 
         user_prompt = replacer.apply_replacements(test_replacements,
                                                   user_cfg.value("prompt", ""));
@@ -981,7 +981,6 @@ struct Conversation {
             test_replacements, char_cfg.value("next_fmt", "<CHAR>:"));
         user_next_tok = user_cfg.value("n_gen", n_predict_default);
         char_next_tok = user_cfg.value("n_gen", n_predict_default);
-        printf("FOFO %s\n", user_prompt.c_str());
 
         turns = chat.value("turns", 100);
 
@@ -990,7 +989,6 @@ struct Conversation {
             replacer.add_extra("<RESPONSE>", char_log_init);
             std::string entry =
                 replacer.apply_replacements(test_replacements, char_log_fmt);
-            printf("FOFO %s\n", entry.c_str());
             chatlog.push_back(entry);
         }
 
@@ -1014,11 +1012,9 @@ struct Conversation {
         cleaned = trim_generated_chat_response(cleaned);
 
         trim_nl(cleaned, " \r\n");
-        printf("PREAPPENDLOG:[%s]\n", cleaned.c_str());
         replacer.add_extra("<RESPONSE>", cleaned);
         std::string entry = replacer.apply_replacements(
             test_replacements, is_user ? user_log_fmt : char_log_fmt);
-            printf("ENTRY:[%s]\n", entry.c_str());
         chatlog.push_back(entry);
 
         // d// printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
@@ -1232,6 +1228,14 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                        json prompt_test,
                        json j_resps,
                        std::vector<std::string> &responses);
+bool chatlog_generator_broken(PromptRunContext &prun_ctx,
+                              gpt_params &params,
+                              Inference &infer,
+                              TextReplacer &replacer,
+                              json prompt_runner_conf,
+                              json prompt_test,
+                              json j_resps,
+                              std::vector<std::string> &responses);
 bool chatlog_generator_slow(PromptRunContext &prun_ctx,
                             gpt_params &params,
                             Inference &infer,
@@ -1241,14 +1245,14 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
                             json j_resps,
                             std::vector<std::string> &responses);
 
-bool chatlog_generator(PromptRunContext &prun_ctx,
-                       gpt_params &params,
-                       Inference &infer,
-                       TextReplacer &replacer,
-                       json prompt_runner_conf,
-                       json prompt_test,
-                       json j_resps,
-                       std::vector<std::string> &responses) {
+bool chatlog_generator_broken(PromptRunContext &prun_ctx,
+                              gpt_params &params,
+                              Inference &infer,
+                              TextReplacer &replacer,
+                              json prompt_runner_conf,
+                              json prompt_test,
+                              json j_resps,
+                              std::vector<std::string> &responses) {
     StopSequences stop_seq;
     if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
         stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
@@ -1281,10 +1285,6 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     json raw_chatlog;
 
     for (int i = 0; i < conversation.chat_turns(); i++) {
-        printf("SEQ[log %d]=%s\n",
-               infer.current_max_seq_token_count(),
-               infer.get_sequence_text("log").c_str());
-
         if (infer.current_max_seq_token_count() > 3900) {
             end_reason = "context limit reached: 3900";
             break;
@@ -1303,6 +1303,10 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                 return false;
             }
         }
+
+        printf("SEQ[log %d]=%s\n",
+               infer.current_max_seq_token_count(),
+               infer.get_sequence_text("log").c_str());
 
         infer.reset_seed(prun_ctx.seed + i);
         infer.reset_sampler("log");
@@ -1345,6 +1349,143 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             return false;
         }
         infer.commit("log");
+
+        is_user = !is_user;
+    }
+
+    llama_sampling_params &sparams = params.sparams;
+
+    std::string model_file = params.model.c_str();
+    model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
+    conversation.log_chatlog_to_file(
+        prun_ctx.seed, model_file, prompt_test, sparams);
+
+    json prompt_collection;
+    prompt_collection["char"] = infer.get_sequence_text("user");
+    prompt_collection["user"] = infer.get_sequence_text("char");
+    prompt_collection["chatlog"] = conversation.chatlog_as_json();
+    prompt_collection["raw_chatlog"] = raw_chatlog;
+    prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
+    prompt_collection["end_reason"] = end_reason;
+
+    j_resps.push_back(make_response(responses,
+                                    prun_ctx,
+                                    infer.get_sequence_text_no_prev("log"),
+                                    infer.get_sequence_token_count("log"),
+                                    prompt_collection));
+
+    return true;
+}
+
+bool chatlog_generator(PromptRunContext &prun_ctx,
+                       gpt_params &params,
+                       Inference &infer,
+                       TextReplacer &replacer,
+                       json prompt_runner_conf,
+                       json prompt_test,
+                       json j_resps,
+                       std::vector<std::string> &responses) {
+    StopSequences stop_seq;
+    if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
+        stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
+    }
+
+    Conversation conversation(replacer, stop_seq, prompt_test);
+    conversation.load_config(prompt_test["chat"], params.n_predict);
+
+    if (!infer.add_start("char", conversation.char_prompt)) {
+        fprintf(stderr, "Couldn't add_start char prompt\n");
+        fflush(stderr);
+        return false;
+    }
+    if (!infer.add_start("user", conversation.user_prompt)) {
+        fprintf(stderr, "Couldn't add_start user prompt\n");
+        fflush(stderr);
+        return false;
+    }
+
+    if (!infer.append("user", conversation.chatlog_text())) {
+        fprintf(stderr, "Couldn't append chatlog\n");
+        fflush(stderr);
+        return false;
+    }
+
+    if (!infer.append("char", conversation.chatlog_text())) {
+        fprintf(stderr, "Couldn't append chatlog\n");
+        fflush(stderr);
+        return false;
+    }
+
+    infer.commit("user");
+    infer.commit("char");
+
+    bool is_user = true;
+    std::string end_reason;
+
+    json raw_chatlog;
+
+    for (int i = 0; i < conversation.chat_turns(); i++) {
+        if (infer.current_max_seq_token_count() > 3900) {
+            end_reason = "context limit reached: 3900";
+            break;
+        }
+
+        std::string sequence_name = is_user ? "user" : "char";
+
+        printf("SEQ[log %d]=%s\n",
+               infer.current_max_seq_token_count(),
+               infer.get_sequence_text(sequence_name).c_str());
+
+        infer.reset_seed(prun_ctx.seed + i);
+        infer.reset_sampler(sequence_name);
+
+        std::string completion_start =
+            conversation.next_completion_fmt(is_user);
+        int completion_token_cnt =
+            conversation.next_completion_tok_count(is_user);
+
+        if (!infer.complete(sequence_name,
+                            completion_start,
+                            completion_token_cnt,
+                            [&](int, const std::string &comp) {
+                                std::string tr;
+                                return stop_seq.trim_stop_sequence(
+                                    comp.substr(completion_start.size()), tr);
+                            })) {
+            end_reason = "inference error";
+            fprintf(stderr, "Inference error!\n");
+            fflush(stderr);
+            return false;
+            break;
+        }
+        std::string completion =
+            infer.get_recently_added_tokens_str(sequence_name);
+        raw_chatlog.push_back(completion);
+        completion = completion.substr(completion_start.size());
+        infer.rewind(sequence_name);
+
+        std::string log_entry =
+            conversation.append_raw_chat_response(is_user, completion);
+
+        printf("> %s", log_entry.c_str());
+        if (completion.size() == 0) {
+            end_reason = "empty response";
+            break;
+        }
+
+        if (!infer.append("user", log_entry)) {
+            fprintf(stderr, "Couldn't append chatlog\n");
+            fflush(stderr);
+            return false;
+        }
+        infer.commit("user");
+
+        if (!infer.append("char", log_entry)) {
+            fprintf(stderr, "Couldn't append chatlog\n");
+            fflush(stderr);
+            return false;
+        }
+        infer.commit("char");
 
         is_user = !is_user;
     }
@@ -1749,14 +1890,14 @@ int main(int argc, char **argv) {
                 } else if (prompt_test.find("chat") != prompt_test.end()) {
                     Inference infer(sparams, params.n_batch);
 
-                    if (!chatlog_generator_slow(prun_ctx,
-                                                params,
-                                                infer,
-                                                replacer,
-                                                prompt_runner_conf,
-                                                prompt_test,
-                                                j_resps,
-                                                responses)) {
+                    if (!chatlog_generator(prun_ctx,
+                                           params,
+                                           infer,
+                                           replacer,
+                                           prompt_runner_conf,
+                                           prompt_test,
+                                           j_resps,
+                                           responses)) {
                         return 1;
                     }
 
