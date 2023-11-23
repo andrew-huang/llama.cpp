@@ -2390,7 +2390,7 @@ static void llm_load_hparams(
 }
 
 // TODO: This should probably be in llama.h
-static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & vocab, std::string raw_text, bool bos, bool special = false);
+static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & vocab, std::string raw_text, bool bos, bool special = false, bool mid_piece = false);
 static llama_token llama_byte_to_token(const llama_vocab & vocab, uint8_t ch);
 
 static void llm_load_vocab(
@@ -6379,7 +6379,7 @@ static void tokenizer_st_partition(const llama_vocab & vocab, std::forward_list<
     }
 }
 
-static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & vocab, std::string raw_text, bool bos, bool special) {
+static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & vocab, std::string raw_text, bool bos, bool special, bool mid_piece) {
     std::vector<llama_vocab::id> output;
 
     // OG tokenizer behavior:
@@ -6414,7 +6414,7 @@ static std::vector<llama_vocab::id> llama_tokenize_internal(const llama_vocab & 
                         //  and passing 'add space prefix' as bool argument
                         //
                         auto raw_text = fragment.raw_text.substr(fragment.offset, fragment.length);
-                        if (&fragment == &fragment_buffer.front()) {
+                        if (!mid_piece && &fragment == &fragment_buffer.front()) {
                             raw_text = " " + raw_text; // prefix with space if the first token is not special
                         }
 
@@ -9489,7 +9489,29 @@ int llama_tokenize(
                          int   n_max_tokens,
                         bool   add_bos,
                         bool   special) {
-    auto res = llama_tokenize_internal(model->vocab, std::string(text, text_len), add_bos, special);
+    auto res = llama_tokenize_internal(model->vocab, std::string(text, text_len), add_bos, special, false);
+
+    if (n_max_tokens < (int) res.size()) {
+        // LLAMA_LOG_ERROR("%s: too many tokens\n", __func__);
+        return -((int) res.size());
+    }
+
+    for (size_t i = 0; i < res.size(); i++) {
+        tokens[i] = res[i];
+    }
+
+    return res.size();
+}
+
+int llama_tokenize_mid_piece(
+    const struct llama_model * model,
+                  const char * text,
+                         int   text_len,
+                 llama_token * tokens,
+                         int   n_max_tokens,
+                        bool   add_bos,
+                        bool   special) {
+    auto res = llama_tokenize_internal(model->vocab, std::string(text, text_len), add_bos, special, true);
 
     if (n_max_tokens < (int) res.size()) {
         // LLAMA_LOG_ERROR("%s: too many tokens\n", __func__);

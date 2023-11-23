@@ -1004,22 +1004,33 @@ std::vector<llama_token> llama_tokenize(
   const struct llama_context * ctx,
            const std::string & text,
                         bool   add_bos,
-                        bool   special) {
-    return llama_tokenize(llama_get_model(ctx), text, add_bos, special);
+                        bool   special,
+                        bool   mid_piece) {
+    return llama_tokenize(llama_get_model(ctx), text, add_bos, special, mid_piece);
 }
 
 std::vector<llama_token> llama_tokenize(
     const struct llama_model * model,
            const std::string & text,
                         bool   add_bos,
-                        bool   special) {
+                        bool   special,
+                        bool mid_piece) {
     // upper limit for the number of tokens
     int n_tokens = text.length() + add_bos;
     std::vector<llama_token> result(n_tokens);
-    n_tokens = llama_tokenize(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+    if (mid_piece) {
+        n_tokens = llama_tokenize_mid_piece(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+    } else {
+        n_tokens = llama_tokenize(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+    }
     if (n_tokens < 0) {
         result.resize(-n_tokens);
-        int check = llama_tokenize(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+        int check = 0;
+        if (mid_piece) {
+            check = llama_tokenize_mid_piece(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+        } else {
+            check = llama_tokenize(model, text.data(), text.length(), result.data(), result.size(), add_bos, special);
+        }
         GGML_ASSERT(check == -n_tokens);
     } else {
         result.resize(n_tokens);

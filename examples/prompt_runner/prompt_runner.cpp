@@ -120,6 +120,7 @@ json sparams_to_json(llama_sampling_params &sp) {
     json j_params;
     j_params["top_k"] = sp.top_k;
     j_params["top_p"] = sp.top_p;
+    j_params["min_p"] = sp.min_p;
     j_params["tfs_z"] = sp.tfs_z;
     j_params["typical_p"] = sp.typical_p;
     j_params["temp"] = sp.temp;
@@ -508,8 +509,9 @@ struct Inference {
 
         const bool add_bos =
             is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
-        std::string t = add_bos ? std::string(" ") + text : text;
-        auto tokens = ::llama_tokenize(*g_ctx, t.c_str(), add_bos, true);
+        std::vector<llama_token> tokens;
+        tokens =
+            ::llama_tokenize(*g_ctx, text.c_str(), add_bos, false, !is_bos);
 
         for (int i = 0; i < (int)tokens.size(); i += n_batch) {
             int n_eval = (int)tokens.size() - i;
@@ -553,7 +555,6 @@ struct Inference {
             seq.name = name;
             seq.recent_add_tokens = tokens.size();
             sequences.push_back(seq);
-            printf("SEQUENCEb[%s] seq_id=%d\n", name.c_str(), seq.seq_id);
         }
 
         return ok;
@@ -639,10 +640,8 @@ struct Inference {
             return false;
         }
         Sequence *seq = &sequences[sidx];
-        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
-               seq->seq_id,
-               seq->p0,
-               seq->p1);
+        //        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
+        //        seq->seq_id, seq->p0, seq->p1);
 
         auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
         auto batch = llama_batch_init(tokens.size(), 0, 1);
@@ -850,11 +849,11 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
-        llama_kv_cache_debug_print(*g_ctx, "bef_rewind");
+        // llama_kv_cache_debug_print(*g_ctx, "bef_rewind");
         if (seq->recent_add_tokens > 0) {
             seq->rewind();
         }
-        llama_kv_cache_debug_print(*g_ctx, "aft_rewind");
+        // llama_kv_cache_debug_print(*g_ctx, "aft_rewind");
 
         return true;
     }
@@ -869,7 +868,6 @@ struct Inference {
             s = &sequences[sequences.size() - 1];
             s->seq_id = cur_seq_id++;
         }
-        printf("APPENDING[%s]\n", text.c_str());
 
         // d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
 
@@ -881,11 +879,6 @@ struct Inference {
         for (auto tok : tokens) {
             s->add_token(tok);
         }
-        printf("append to seq_id=%d new_p1=%d, seq->p1=%d [%s]\n",
-               s->seq_id,
-               new_p1,
-               s->p1,
-               s->recent_string().c_str());
         return ok;
     }
 
@@ -1404,20 +1397,19 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         return false;
     }
 
-    if (!infer.append("user", conversation.chatlog_text())) {
-        fprintf(stderr, "Couldn't append chatlog\n");
-        fflush(stderr);
-        return false;
-    }
-
     if (!infer.append("char", conversation.chatlog_text())) {
         fprintf(stderr, "Couldn't append chatlog\n");
         fflush(stderr);
         return false;
     }
-
-    infer.commit("user");
     infer.commit("char");
+
+    if (!infer.append("user", conversation.chatlog_text())) {
+        fprintf(stderr, "Couldn't append chatlog\n");
+        fflush(stderr);
+        return false;
+    }
+    infer.commit("user");
 
     bool is_user = true;
     std::string end_reason;

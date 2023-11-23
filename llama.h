@@ -571,6 +571,16 @@ extern "C" {
                             bool   add_bos,
                             bool   special);
 
+    // Added by WeiCon
+    LLAMA_API int llama_tokenize_mid_piece(
+        const struct llama_model * model,
+                      const char * text,
+                             int   text_len,
+                     llama_token * tokens,
+                             int   n_max_tokens,
+                            bool   add_bos,
+                            bool   special);
+
     // Token Id -> Piece.
     // Uses the vocabulary in the provided context.
     // Does not write null terminator to the buffer.
