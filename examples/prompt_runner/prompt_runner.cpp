@@ -19,7 +19,6 @@
 #include <string>
 #include <vector>
 
-#include "build-info.h"
 #include "common.h"
 #include "json.hpp"
 #include "llama.h"
