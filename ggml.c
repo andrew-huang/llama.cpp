@@ -1200,7 +1200,7 @@ static void ggml_vec_dot_f32(const int n, float * restrict s, const float * rest
 static void ggml_vec_dot_f16(const int n, float * restrict s, ggml_fp16_t * restrict x, ggml_fp16_t * restrict y) {
     ggml_float sumf = 0.0;
 
-#if defined(GGML_SIMD__IGNORE__)
+#if defined(GGML_SIMD)
     const int np = (n & ~(GGML_F16_STEP - 1));
 
     GGML_F16_VEC sum[GGML_F16_ARR] = { GGML_F16_VEC_ZERO };

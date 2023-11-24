@@ -151,25 +151,19 @@ struct PromptRunContext {
     int total_tests;
     std::string test_id;
     json expected;
-    float temp;
     int64_t seed;
     size_t prompt_token_cnt;
 
     PromptRunContext()
         : cur_test_nr(0),
           total_tests(0),
-          temp(1.0),
           seed(0),
           prompt_token_cnt(0) {}
 };
 
-json make_token_respose(std::vector<std::string> &responses,
-                        PromptRunContext &prc,
-                        json tokens);
+json make_token_respose(PromptRunContext &prc, json tokens);
 
-json make_token_respose(std::vector<std::string> &responses,
-                        PromptRunContext &prc,
-                        json tokens) {
+json make_token_respose(PromptRunContext &prc, json tokens) {
     if (prc.cur_test_nr <= 0) prc.cur_test_nr = 1;
 
     int passed_time = time(NULL) - benchmark_start_time;
@@ -205,8 +199,6 @@ json make_token_respose(std::vector<std::string> &responses,
            info_str.c_str());
     fflush(stdout);
 
-    responses.push_back(prc.test_id + "=" + info_str);
-
     json single_response;
     single_response["test_id"] = prc.test_id;
     single_response["tokens"] = tokens;
@@ -218,21 +210,15 @@ json make_token_respose(std::vector<std::string> &responses,
     return single_response;
 }
 
-json make_response(std::vector<std::string> &responses,
-                   PromptRunContext &prc,
+json make_response(PromptRunContext &prc,
                    const std::string gen,
                    int gen_tok_cnt,
                    json prompt);
 
-json make_response(std::vector<std::string> &responses,
-                   PromptRunContext &prc,
+json make_response(PromptRunContext &prc,
                    const std::string gen,
                    int gen_tok_cnt,
                    json prompt) {
-    std::ostringstream oss;
-    oss << std::setprecision(1) << prc.temp;
-    std::string temp_str = oss.str();
-
     if (prc.cur_test_nr <= 0) prc.cur_test_nr = 1;
 
     int passed_time = time(NULL) - benchmark_start_time;
@@ -250,7 +236,7 @@ json make_response(std::vector<std::string> &responses,
     std::string gen_prefix =
         "[" + std::to_string(prc.cur_test_nr) + "/" +
         std::to_string(prc.total_tests) + "| id=" + prc.test_id +
-        ", temp=" + temp_str + ", seed=" + std::to_string(prc.seed) +
+        ", seed=" + std::to_string(prc.seed) +
         ", #p=" + std::to_string((int)prc.prompt_token_cnt) +
         ", #g=" + std::to_string(gen_tok_cnt) + ", #e=" + expected_s + "]:";
 
@@ -267,12 +253,9 @@ json make_response(std::vector<std::string> &responses,
            print_gen.c_str());
     fflush(stdout);
 
-    responses.push_back(gen_prefix + gen);
-
     json single_response;
     single_response["test_id"] = prc.test_id;
     single_response["seed"] = prc.seed;
-    single_response["temp"] = temp_str;
     single_response["response"] = gen;
     single_response["expected"] = prc.expected;
     single_response["prompt"] = prompt;
@@ -286,6 +269,7 @@ json make_response(std::vector<std::string> &responses,
 
 std::string trim_generated_chat_response(std::string gen);
 
+std::string cleanup_unbalanced(const std::string &str, char quot);
 std::string cleanup_unbalanced(const std::string &str, char quot) {
     bool found_open = false;
     size_t idx_last_quot = 0;
@@ -333,18 +317,32 @@ struct TextReplacer {
     json prompt_runner_conf;
     json extra_replacements;
 
+    TextReplacer() {}
     TextReplacer(json prconf) : prompt_runner_conf(prconf) {}
 
     void add_extra(const std::string &key, const std::string &repl) {
         extra_replacements[key] = repl;
     }
 
-    std::string apply_replacements(json prompt_test, std::string prompt) {
+    void merge_replacements(json replacements) {
+        if (replacements.find("replacements") != replacements.end()) {
+            for (const auto &repl : replacements["replacements"]) {
+                std::string search = repl[0];
+                std::string replacement = repl[1];
+                extra_replacements[search] = replacement;
+            }
+        }
+    }
+
+    std::string apply_replacements(std::string prompt) {
         for (const auto &repl : extra_replacements.items()) {
             std::string search = repl.key();
             std::string replacement = repl.value();
-            prompt =
+            std::string new_t =
                 std::regex_replace(prompt, std::regex(search), replacement);
+            if (new_t != prompt) {
+                prompt = apply_replacements(new_t);
+            }
         }
 
         if (prompt_runner_conf.find("replacements") !=
@@ -352,27 +350,51 @@ struct TextReplacer {
             for (const auto &repl : prompt_runner_conf["replacements"]) {
                 std::string search = repl[0];
                 std::string replacement = repl[1];
-                prompt =
+                std::string new_t =
                     std::regex_replace(prompt, std::regex(search), replacement);
+                if (new_t != prompt) {
+                    prompt = apply_replacements(new_t);
+                }
             }
         }
 
-        std::string repl_info = "";
+        return prompt;
+    }
+
+    std::string apply_replacements(json prompt_test, std::string prompt) {
+        for (const auto &repl : extra_replacements.items()) {
+            std::string search = repl.key();
+            std::string replacement = repl.value();
+            std::string new_t =
+                std::regex_replace(prompt, std::regex(search), replacement);
+            if (new_t != prompt) {
+                prompt = apply_replacements(prompt_test, new_t);
+            }
+        }
+
+        if (prompt_runner_conf.find("replacements") !=
+            prompt_runner_conf.end()) {
+            for (const auto &repl : prompt_runner_conf["replacements"]) {
+                std::string search = repl[0];
+                std::string replacement = repl[1];
+                std::string new_t =
+                    std::regex_replace(prompt, std::regex(search), replacement);
+                if (new_t != prompt) {
+                    prompt = apply_replacements(prompt_test, new_t);
+                }
+            }
+        }
 
         if (prompt_test.find("replacements") != prompt_test.end()) {
             for (const auto &repl : prompt_test["replacements"]) {
                 std::string search = repl[0];
                 std::string replacement = repl[1];
-                if (replacement.size() < 250) {
-                    repl_info += search + " := " + replacement + "\n";
-                }
-                prompt =
+                std::string new_t =
                     std::regex_replace(prompt, std::regex(search), replacement);
+                if (new_t != prompt) {
+                    prompt = apply_replacements(prompt_test, new_t);
+                }
             }
-        }
-
-        if (repl_info.size() > 0) {
-            printf("------------------------\n%s", repl_info.c_str());
         }
 
         return prompt;
@@ -386,8 +408,6 @@ struct Inference {
         int p1;
         // kv cache sequence ID
         int seq_id;
-        // sequence ID before rebase
-        int rebase_seq_id;
         // name of this sequence
         std::string name;
         // name of the previous sequence
@@ -396,12 +416,7 @@ struct Inference {
         // for rewinding
         int recent_add_tokens;
 
-        Sequence()
-            : p0(0),
-              p1(0),
-              seq_id(0),
-              rebase_seq_id(-1),
-              recent_add_tokens(0) {}
+        Sequence() : p0(0), p1(0), seq_id(0), recent_add_tokens(0) {}
 
         void commit() { recent_add_tokens = 0; }
 
@@ -577,60 +592,6 @@ struct Inference {
         }
     }
 
-    bool rebase(const std::string &name, const std::string &new_prev) {
-        int sidx = get_sequence_idx(name);
-        if (sidx < 0) {
-            return false;
-        }
-
-        int dest_idx = get_sequence_idx(new_prev);
-        if (dest_idx < 0) {
-            return false;
-        }
-
-        Sequence *src = &sequences[sidx];
-        Sequence *dest = &sequences[dest_idx];
-        printf("REBASE [%s]seq=%d [%d-%d) onto [%s]seq=%d [%d-%d)\n",
-               src->name.c_str(),
-               src->seq_id,
-               src->p0,
-               src->p1,
-               dest->name.c_str(),
-               dest->seq_id,
-               dest->p0,
-               dest->p1);
-
-        llama_kv_cache_debug_print(*g_ctx, "bef_reb");
-        if (src->rebase_seq_id < 0) {
-            src->rebase_seq_id = src->seq_id;
-        } else {
-            //            llama_kv_cache_debug_print(*g_ctx, "pre_copy");
-            llama_kv_cache_seq_cp(
-                *g_ctx, src->seq_id, src->rebase_seq_id, src->p0, src->p1);
-            llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
-            src->seq_id = src->rebase_seq_id;
-        }
-
-        //        llama_kv_cache_debug_print(*g_ctx, "before");
-        int offs = dest->p1 - src->p0;
-        llama_kv_cache_seq_shift(*g_ctx, src->seq_id, src->p0, src->p1, offs);
-        //        llama_kv_cache_debug_print(*g_ctx, "aft_shift");
-        src->p0 += offs;
-        src->p1 += offs;
-        src->prev_name = new_prev;
-
-        llama_kv_cache_seq_cp(
-            *g_ctx, src->seq_id, dest->seq_id, src->p0, src->p1);
-        //        llama_kv_cache_debug_print(*g_ctx, "aft_cp");
-        llama_kv_cache_seq_rm(*g_ctx, src->seq_id, src->p0, src->p1);
-        //        llama_kv_cache_debug_print(*g_ctx, "after");
-        llama_kv_cache_debug_print(*g_ctx, "aft_reb");
-
-        src->seq_id = dest->seq_id;
-
-        return true;
-    }
-
     bool complete(const std::string &name,
                   const std::string &text,
                   int n_remain,
@@ -643,7 +604,7 @@ struct Inference {
         //        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
         //        seq->seq_id, seq->p0, seq->p1);
 
-        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true);
+        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true, true);
         auto batch = llama_batch_init(tokens.size(), 0, 1);
         for (size_t i = 0; i < tokens.size(); i++) {
             bool is_last = (i + 1 == tokens.size());
@@ -921,26 +882,83 @@ struct StopSequences {
     }
 };
 
+struct Character {
+    TextReplacer replacer;
+    std::string name;
+    std::string prompt;
+    std::string log_fmt;
+    std::string next_fmt;
+    std::string first_message;
+    int n_gen_tokens;
+
+    Character() : n_gen_tokens(0) {}
+
+    void load(const TextReplacer &repl,
+              json def,
+              const std::string other_name,
+              int n_predict_default) {
+        replacer = repl;
+
+        name = def.value("name", "Anon");
+
+        replacer.merge_replacements(def);
+        replacer.add_extra("\\{bot\\}", name);
+        replacer.add_extra("\\{BOT\\}", name);
+        replacer.add_extra("\\{char\\}", name);
+        replacer.add_extra("\\{CHAR\\}", name);
+        replacer.add_extra("\\{user\\}", other_name);
+        replacer.add_extra("\\{USER\\}", other_name);
+        replacer.add_extra("\\{\\{user\\}\\}", other_name);
+        replacer.add_extra("\\{\\{USER\\}\\}", other_name);
+        replacer.add_extra("<BOT>", name);
+        replacer.add_extra("<bot>", name);
+        replacer.add_extra("<CHAR>", name);
+        replacer.add_extra("<char>", name);
+        replacer.add_extra("<USER>", other_name);
+        replacer.add_extra("<user>", other_name);
+
+        prompt = replacer.apply_replacements(def.value("prompt", ""));
+        log_fmt = def.value("log_fmt", "<BOT>: <RESPONSE>\n");
+        next_fmt = replacer.apply_replacements(def.value("next_fmt", "<BOT>:"));
+        first_message =
+            replacer.apply_replacements(def.value("first_mes", "Hello!"));
+        n_gen_tokens = def.value("n_gen", n_predict_default);
+    }
+
+    std::string format_for_log(const std::string &response) {
+        replacer.add_extra("<RESPONSE>", response);
+        return replacer.apply_replacements(log_fmt);
+    }
+
+    std::string format_for_next() { return next_fmt; }
+};
+
 struct Conversation {
+    struct ChatlogEntry {
+        int prompt_token_count;
+        std::string text;
+        std::string raw;
+
+        ChatlogEntry() : prompt_token_count(0) {}
+        ChatlogEntry(const std::string &txt) {
+            prompt_token_count = 0;
+            text = txt;
+            raw = txt;
+        }
+    };
+
     TextReplacer replacer;
     StopSequences stop_seq;
-    std::string char_log_fmt;
-    std::string user_log_fmt;
-
-    std::string char_prompt;
-    std::string user_prompt;
-
-    std::string char_next_fmt;
-    std::string user_next_fmt;
-    int user_next_tok;
-    int char_next_tok;
-
-    int turns;
 
     json char_cfg;
     json user_cfg;
 
-    std::vector<std::string> chatlog;
+    Character c_user;
+    Character c_char;
+
+    int turns;
+
+    std::vector<ChatlogEntry> chatlog;
 
     json test_replacements;
 
@@ -962,27 +980,27 @@ struct Conversation {
             return false;
         }
 
-        user_prompt = replacer.apply_replacements(test_replacements,
-                                                  user_cfg.value("prompt", ""));
-        char_prompt = replacer.apply_replacements(test_replacements,
-                                                  char_cfg.value("prompt", ""));
-        user_log_fmt = user_cfg.value("log_fmt", "<USER>: <RESPONSE>\n");
-        char_log_fmt = char_cfg.value("log_fmt", "<CHAR>: <RESPONSE>\n");
-        user_next_fmt = replacer.apply_replacements(
-            test_replacements, user_cfg.value("next_fmt", "<USER>:"));
-        char_next_fmt = replacer.apply_replacements(
-            test_replacements, char_cfg.value("next_fmt", "<CHAR>:"));
-        user_next_tok = user_cfg.value("n_gen", n_predict_default);
-        char_next_tok = user_cfg.value("n_gen", n_predict_default);
+        replacer.merge_replacements(test_replacements);
+
+        c_char.load(replacer,
+                    char_cfg,
+                    user_cfg.value("name", "Ayumi"),
+                    n_predict_default);
+        c_user.load(replacer,
+                    user_cfg,
+                    char_cfg.value("name", "Anon"),
+                    n_predict_default);
 
         turns = chat.value("turns", 100);
 
-        std::string char_log_init = chat.value("char_log_init", "");
-        if (char_log_init.size() > 0) {
-            replacer.add_extra("<RESPONSE>", char_log_init);
-            std::string entry =
-                replacer.apply_replacements(test_replacements, char_log_fmt);
-            chatlog.push_back(entry);
+        if (c_char.first_message != "") {
+            std::string entry = c_char.format_for_log(c_char.first_message);
+            chatlog.push_back(ChatlogEntry(entry));
+        }
+
+        if (c_user.first_message != "") {
+            std::string entry = c_user.format_for_log(c_user.first_message);
+            chatlog.push_back(ChatlogEntry(entry));
         }
 
         return true;
@@ -991,38 +1009,80 @@ struct Conversation {
     int chat_turns() { return turns; }
 
     std::string next_completion_fmt(bool is_user) {
-        return is_user ? user_next_fmt : char_next_fmt;
+        return is_user ? c_user.format_for_next() : c_char.format_for_next();
     }
 
     int next_completion_tok_count(bool is_user) {
-        return is_user ? user_next_tok : char_next_tok;
+        return is_user ? c_user.n_gen_tokens : c_char.n_gen_tokens;
     }
 
     std::string append_raw_chat_response(bool is_user,
-                                         const std::string &resp) {
+                                         const std::string &resp,
+                                         const std::string &raw,
+                                         int prompt_token_count) {
         std::string cleaned;
         stop_seq.trim_stop_sequence(resp, cleaned);
         cleaned = trim_generated_chat_response(cleaned);
 
         trim_nl(cleaned, " \r\n");
-        replacer.add_extra("<RESPONSE>", cleaned);
-        std::string entry = replacer.apply_replacements(
-            test_replacements, is_user ? user_log_fmt : char_log_fmt);
-        chatlog.push_back(entry);
 
-        // d// printf("APPENDLOG:[%s]\n", chatlog.back().c_str());
+        Character *c = is_user ? &c_user : &c_char;
+        std::string entry = c->format_for_log(cleaned);
+
+        ChatlogEntry ce;
+        ce.prompt_token_count = prompt_token_count;
+        ce.text = entry;
+        ce.raw = raw;
+        chatlog.push_back(ce);
 
         return entry;
     }
 
-    std::string chatlog_text() { return concatl(chatlog); }
+    std::string concatl(const std::vector<ChatlogEntry> &l, bool indent) {
+        std::string logstr;
+        for (auto logentry : l) {
+            if (indent) {
+                std::string le = logentry.text;
+                std::replace(le.begin(), le.end(), '\n', ' ');
+                logstr += "    " + le + "\n\n";
+            } else {
+                logstr += logentry.text;
+            }
+        }
+        return logstr;
+    }
+
+    std::string user_prompt() { return c_user.prompt; }
+    std::string char_prompt() { return c_char.prompt; }
+
+    std::string chatlog_text() { return concatl(chatlog, false); }
 
     std::string chatlog_text_ext() { return concatl(chatlog, true); }
+
+    json raw_chatlog_as_json() {
+        json log;
+        for (auto l : chatlog) {
+            log.push_back(l.raw);
+        }
+        return log;
+    }
+
+    json text_chatlog_as_json() {
+        json log;
+        for (auto l : chatlog) {
+            log.push_back(l.text);
+        }
+        return log;
+    }
 
     json chatlog_as_json() {
         json log;
         for (auto l : chatlog) {
-            log.push_back(l);
+            json entry;
+            entry["prompt_token_count"] = l.prompt_token_count;
+            entry["text"] = l.text;
+            entry["raw"] = l.raw;
+            log.push_back(entry);
         }
         return log;
     }
@@ -1047,31 +1107,44 @@ struct Conversation {
              << replacer.apply_replacements(test_replacements, "<CHAR>")
              << "'\n\n";
         outf << "```\n";
-        outf << char_prompt;
+        outf << c_char.prompt;
         outf << "\n```\n\n";
         outf << "## User Prompt '"
              << replacer.apply_replacements(test_replacements, "<USER>")
              << "'\n\n";
         outf << "```\n";
-        outf << user_prompt;
+        outf << c_user.prompt;
         outf << "\n```\n\n";
         outf << "## Chatlog\n\n";
         outf << chatlog_text_ext();
         outf << "\n";
         outf.close();
+        printf("WROTE FILE %s\n", out_file_name.c_str());
+        fflush(stdout);
 
-        printf("wrote file %s\n", out_file_name.c_str());
+
+        json chatlog;
+        chatlog["model_file"] = model_file;
+        chatlog["sampling"] = sinfo;
+        chatlog["chatlog"] = chatlog_as_json();
+        chatlog["timestamp"] = std::to_string(time(NULL));
+        chatlog["time"] = now_timestr();
+        std::string jout_file_name = "chatlog_" + model_file + "_" + test_id +
+                                    "_" + std::to_string(time(NULL)) + ".json";
+        std::ofstream joutf(jout_file_name);
+        joutf << chatlog.dump(2, ' ', false, json::error_handler_t::replace);
+        joutf.close();
+        printf("WROTE FILE %s\n", jout_file_name.c_str());
+        fflush(stdout);
     }
 };
 
-void record_token_info(std::vector<std::string> &responses,
-                       json &j_tok_resps,
+void record_token_info(json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling,
                        int sample_idx);
 
-void record_token_info(std::vector<std::string> &responses,
-                       json &j_tok_resps,
+void record_token_info(json &j_tok_resps,
                        PromptRunContext &prc,
                        struct llama_sampling_context *ctx_sampling,
                        int sample_idx) {
@@ -1113,18 +1186,16 @@ void record_token_info(std::vector<std::string> &responses,
     }
 
     if (tokens.size() > 1) {
-        j_tok_resps.push_back(make_token_respose(responses, prc, tokens));
+        j_tok_resps.push_back(make_token_respose(prc, tokens));
     }
 }
 
-llama_token generate_sample_seeded(std::vector<std::string> &responses,
-                                   json j_resps,
+llama_token generate_sample_seeded(json &j_resps,
                                    std::vector<int64_t> &sample_seeds,
                                    PromptRunContext &prc,
                                    struct llama_sampling_context *ctx_sampling);
 
 llama_token generate_sample_seeded(
-    std::vector<std::string> &responses,
     json j_resps,
     std::vector<int64_t> &sample_seeds,
     PromptRunContext &prc,
@@ -1138,7 +1209,7 @@ llama_token generate_sample_seeded(
 
         if (sample_seeds.size() > 0 && id != llama_token_eos(*g_model)) {
             std::string gen = tokens_to_output_formatted_string(*g_ctx, id);
-            j_resps.push_back(make_response(responses, prc, gen, 1, json()));
+            j_resps.push_back(make_response(prc, gen, 1, json()));
         }
     }
 
@@ -1219,156 +1290,14 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                        TextReplacer &replacer,
                        json prompt_runner_conf,
                        json prompt_test,
-                       json j_resps,
-                       std::vector<std::string> &responses);
-bool chatlog_generator_broken(PromptRunContext &prun_ctx,
-                              gpt_params &params,
-                              Inference &infer,
-                              TextReplacer &replacer,
-                              json prompt_runner_conf,
-                              json prompt_test,
-                              json j_resps,
-                              std::vector<std::string> &responses);
+                       json &j_resps);
 bool chatlog_generator_slow(PromptRunContext &prun_ctx,
                             gpt_params &params,
                             Inference &infer,
                             TextReplacer &replacer,
                             json prompt_runner_conf,
                             json prompt_test,
-                            json j_resps,
-                            std::vector<std::string> &responses);
-
-bool chatlog_generator_broken(PromptRunContext &prun_ctx,
-                              gpt_params &params,
-                              Inference &infer,
-                              TextReplacer &replacer,
-                              json prompt_runner_conf,
-                              json prompt_test,
-                              json j_resps,
-                              std::vector<std::string> &responses) {
-    StopSequences stop_seq;
-    if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
-        stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
-    }
-
-    Conversation conversation(replacer, stop_seq, prompt_test);
-    conversation.load_config(prompt_test["chat"], params.n_predict);
-
-    if (!infer.add_start("char", conversation.char_prompt)) {
-        fprintf(stderr, "Couldn't add_start char prompt\n");
-        fflush(stderr);
-        return false;
-    }
-    if (!infer.add_start("user", conversation.user_prompt)) {
-        fprintf(stderr, "Couldn't add_start user prompt\n");
-        fflush(stderr);
-        return false;
-    }
-
-    if (!infer.append("log", conversation.chatlog_text())) {
-        fprintf(stderr, "Couldn't append chatlog\n");
-        fflush(stderr);
-        return false;
-    }
-    infer.commit("log");
-
-    bool is_user = true;
-    std::string end_reason;
-
-    json raw_chatlog;
-
-    for (int i = 0; i < conversation.chat_turns(); i++) {
-        if (infer.current_max_seq_token_count() > 3900) {
-            end_reason = "context limit reached: 3900";
-            break;
-        }
-
-        if (is_user) {
-            if (!infer.rebase("log", "user")) {
-                fprintf(stderr, "Couldn't rebase to user\n");
-                fflush(stderr);
-                return false;
-            }
-        } else {
-            if (!infer.rebase("log", "char")) {
-                fprintf(stderr, "Couldn't rebase to char\n");
-                fflush(stderr);
-                return false;
-            }
-        }
-
-        printf("SEQ[log %d]=%s\n",
-               infer.current_max_seq_token_count(),
-               infer.get_sequence_text("log").c_str());
-
-        infer.reset_seed(prun_ctx.seed + i);
-        infer.reset_sampler("log");
-
-        std::string completion_start =
-            conversation.next_completion_fmt(is_user);
-        int completion_token_cnt =
-            conversation.next_completion_tok_count(is_user);
-
-        if (!infer.complete("log",
-                            completion_start,
-                            completion_token_cnt,
-                            [&](int, const std::string &comp) {
-                                std::string tr;
-                                return stop_seq.trim_stop_sequence(
-                                    comp.substr(completion_start.size()), tr);
-                            })) {
-            end_reason = "inference error";
-            fprintf(stderr, "Inference error!\n");
-            fflush(stderr);
-            return false;
-            break;
-        }
-        std::string completion = infer.get_recently_added_tokens_str("log");
-        raw_chatlog.push_back(completion);
-        completion = completion.substr(completion_start.size());
-        infer.rewind("log");
-
-        std::string log_entry =
-            conversation.append_raw_chat_response(is_user, completion);
-
-        printf("> %s", log_entry.c_str());
-        if (completion.size() == 0) {
-            end_reason = "empty response";
-            break;
-        }
-        if (!infer.append("log", log_entry)) {
-            fprintf(stderr, "Couldn't append chatlog\n");
-            fflush(stderr);
-            return false;
-        }
-        infer.commit("log");
-
-        is_user = !is_user;
-    }
-
-    llama_sampling_params &sparams = params.sparams;
-
-    std::string model_file = params.model.c_str();
-    model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
-    conversation.log_chatlog_to_file(
-        prun_ctx.seed, model_file, prompt_test, sparams);
-
-    json prompt_collection;
-    prompt_collection["char"] = infer.get_sequence_text("user");
-    prompt_collection["user"] = infer.get_sequence_text("char");
-    prompt_collection["chatlog"] = conversation.chatlog_as_json();
-    prompt_collection["raw_chatlog"] = raw_chatlog;
-    prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
-    prompt_collection["end_reason"] = end_reason;
-
-    j_resps.push_back(make_response(responses,
-                                    prun_ctx,
-                                    infer.get_sequence_text_no_prev("log"),
-                                    infer.get_sequence_token_count("log"),
-                                    prompt_collection));
-
-    return true;
-}
+                            json &j_resps);
 
 bool chatlog_generator(PromptRunContext &prun_ctx,
                        gpt_params &params,
@@ -1376,8 +1305,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                        TextReplacer &replacer,
                        json prompt_runner_conf,
                        json prompt_test,
-                       json j_resps,
-                       std::vector<std::string> &responses) {
+                       json &j_resps) {
     StopSequences stop_seq;
     if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
         stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
@@ -1386,12 +1314,12 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     Conversation conversation(replacer, stop_seq, prompt_test);
     conversation.load_config(prompt_test["chat"], params.n_predict);
 
-    if (!infer.add_start("char", conversation.char_prompt)) {
+    if (!infer.add_start("char", conversation.char_prompt())) {
         fprintf(stderr, "Couldn't add_start char prompt\n");
         fflush(stderr);
         return false;
     }
-    if (!infer.add_start("user", conversation.user_prompt)) {
+    if (!infer.add_start("user", conversation.user_prompt())) {
         fprintf(stderr, "Couldn't add_start user prompt\n");
         fflush(stderr);
         return false;
@@ -1414,11 +1342,11 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     bool is_user = true;
     std::string end_reason;
 
-    json raw_chatlog;
+    int prompt_max_len = 3900;
 
     for (int i = 0; i < conversation.chat_turns(); i++) {
-        if (infer.current_max_seq_token_count() > 3900) {
-            end_reason = "context limit reached: 3900";
+        if (infer.current_max_seq_token_count() > prompt_max_len) {
+            end_reason = "context limit reached: " + std::to_string(prompt_max_len);
             break;
         }
 
@@ -1427,6 +1355,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         printf("SEQ[log %d]=%s\n",
                infer.current_max_seq_token_count(),
                infer.get_sequence_text(sequence_name).c_str());
+        fflush(stdout);
 
         infer.reset_seed(prun_ctx.seed + i);
         infer.reset_sampler(sequence_name);
@@ -1450,16 +1379,45 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             return false;
             break;
         }
+
+        int prompt_token_count = infer.get_sequence_token_count(sequence_name);
         std::string completion =
             infer.get_recently_added_tokens_str(sequence_name);
-        raw_chatlog.push_back(completion);
+        std::string raw = completion;
         completion = completion.substr(completion_start.size());
         infer.rewind(sequence_name);
 
-        std::string log_entry =
-            conversation.append_raw_chat_response(is_user, completion);
+        std::string log_entry = conversation.append_raw_chat_response(
+            is_user, completion, raw, prompt_token_count);
 
-        printf("> %s", log_entry.c_str());
+        std::string print_gen = log_entry;
+        std::replace(print_gen.begin(), print_gen.end(), '\r', ' ');
+        std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
+        std::replace(print_gen.begin(), print_gen.end(), '\t', '/');
+
+        float chat_fraction = ((float) i) / ((float) conversation.chat_turns());
+        int passed_time = time(NULL) - benchmark_start_time;
+        float passed_tests_f = (((float)(prun_ctx.cur_test_nr - 1)) + chat_fraction);
+        float time_per_test = passed_tests_f > 0.01 ? ((float)passed_time) / passed_tests_f : 0.0;
+        float remaining =
+            time_per_test * (((float)prun_ctx.total_tests) - passed_tests_f);
+        remaining /= 60.0;
+
+        float passed_time_mins = ((float)passed_time) / 60.0;
+
+        printf("[test_id=%s, eta=%5.1fm, t=%5.1fm, seed=%ld, test_nr=%d, total_tests=%d, cur_turn=%d, turns=%d, plen=%d, pmax=%d]: %s\n",
+            prun_ctx.test_id.c_str(),
+            remaining,
+            passed_time_mins,
+            prun_ctx.seed,
+            prun_ctx.cur_test_nr,
+            prun_ctx.total_tests,
+            i, conversation.chat_turns(),
+            infer.current_max_seq_token_count(),
+            prompt_max_len,
+            print_gen.c_str());
+        fflush(stdout);
+
         if (completion.size() == 0) {
             end_reason = "empty response";
             break;
@@ -1493,12 +1451,12 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     prompt_collection["char"] = infer.get_sequence_text("user");
     prompt_collection["user"] = infer.get_sequence_text("char");
     prompt_collection["chatlog"] = conversation.chatlog_as_json();
-    prompt_collection["raw_chatlog"] = raw_chatlog;
+    prompt_collection["raw_chatlog"] = conversation.raw_chatlog_as_json();
+    prompt_collection["text_chatlog"] = conversation.text_chatlog_as_json();
     prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
     prompt_collection["end_reason"] = end_reason;
 
-    j_resps.push_back(make_response(responses,
-                                    prun_ctx,
+    j_resps.push_back(make_response(prun_ctx,
                                     infer.get_sequence_text_no_prev("log"),
                                     infer.get_sequence_token_count("log"),
                                     prompt_collection));
@@ -1512,8 +1470,7 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
                             TextReplacer &replacer,
                             json prompt_runner_conf,
                             json prompt_test,
-                            json j_resps,
-                            std::vector<std::string> &responses) {
+                            json &j_resps) {
     StopSequences stop_seq;
     if (prompt_runner_conf.find("stop_sequences") != prompt_runner_conf.end()) {
         stop_seq.set_stop_sequences(prompt_runner_conf["stop_sequences"]);
@@ -1522,12 +1479,12 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
     Conversation conversation(replacer, stop_seq, prompt_test);
     conversation.load_config(prompt_test["chat"], params.n_predict);
 
-    if (!infer.add_start("char", conversation.char_prompt)) {
+    if (!infer.add_start("char", conversation.char_prompt())) {
         fprintf(stderr, "Couldn't add_start char prompt\n");
         fflush(stderr);
         return false;
     }
-    if (!infer.add_start("user", conversation.user_prompt)) {
+    if (!infer.add_start("user", conversation.user_prompt())) {
         fprintf(stderr, "Couldn't add_start user prompt\n");
         fflush(stderr);
         return false;
@@ -1544,23 +1501,25 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
 
     json raw_chatlog;
 
+        int prompt_max_len = 3900;
+
     for (int i = 0; i < conversation.chat_turns(); i++) {
         printf("SEQ[log %d]=%s\n",
                infer.current_max_seq_token_count(),
                infer.get_sequence_text("base_prompt").c_str());
 
-        if (infer.current_max_seq_token_count() > 3900) {
-            end_reason = "context limit reached: 3900";
+        if (infer.current_max_seq_token_count() > prompt_max_len) {
+            end_reason = "context limit reached: " + std::to_string(prompt_max_len);
             break;
         }
 
         infer.clear();
         if (is_user) {
-            infer.add_start("base_prompt", conversation.user_prompt);
+            infer.add_start("base_prompt", conversation.user_prompt());
             infer.append("base_prompt", conversation.chatlog_text());
 
         } else {
-            infer.add_start("base_prompt", conversation.char_prompt);
+            infer.add_start("base_prompt", conversation.char_prompt());
             infer.append("base_prompt", conversation.chatlog_text());
         }
         infer.commit("base_prompt");
@@ -1587,14 +1546,16 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
             return false;
             break;
         }
+        int prompt_token_count = infer.get_sequence_token_count("base_prompt");
         std::string completion =
             infer.get_recently_added_tokens_str("base_prompt");
         printf("COMPLE[%s]\n", completion.c_str());
         raw_chatlog.push_back(completion);
+        std::string raw = completion;
         completion = completion.substr(completion_start.size());
 
-        std::string log_entry =
-            conversation.append_raw_chat_response(is_user, completion);
+        std::string log_entry = conversation.append_raw_chat_response(
+            is_user, completion, raw, prompt_token_count);
 
         printf("> %s", log_entry.c_str());
         if (completion.size() == 0) {
@@ -1613,16 +1574,15 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
         prun_ctx.seed, model_file, prompt_test, sparams);
 
     json prompt_collection;
-    prompt_collection["char"] = conversation.char_prompt;
-    prompt_collection["user"] = conversation.user_prompt;
+    prompt_collection["char"] = conversation.char_prompt();
+    prompt_collection["user"] = conversation.user_prompt();
     prompt_collection["chatlog"] = conversation.chatlog_as_json();
     prompt_collection["raw_chatlog"] = raw_chatlog;
     prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
     prompt_collection["end_reason"] = end_reason;
 
     j_resps.push_back(
-        make_response(responses,
-                      prun_ctx,
+        make_response(prun_ctx,
                       infer.get_sequence_text_no_prev("base_prompt"),
                       infer.get_sequence_token_count("base_prompt"),
                       prompt_collection));
@@ -1726,7 +1686,6 @@ int main(int argc, char **argv) {
 
     // tokenize the prompt
     std::vector<llama_token> embd_inp;
-    std::vector<std::string> responses;
     json j_resps;
     json j_tok_resps;
 
@@ -1742,17 +1701,6 @@ int main(int argc, char **argv) {
             int64_t seed = seed_value;
             sample_seeds.push_back(seed);
         }
-    }
-
-    std::vector<float> temps;
-
-    if (prompt_runner_conf.find("temps") != prompt_runner_conf.end()) {
-        fprintf(stderr, "Reading temps\n");
-        for (const auto &temp : prompt_runner_conf["temps"]) {
-            temps.push_back(temp);
-        }
-    } else {
-        temps.push_back(sparams.temp);
     }
 
     std::vector<int64_t> seeds;
@@ -1785,7 +1733,7 @@ int main(int argc, char **argv) {
     TextReplacer replacer(prompt_runner_conf);
 
     PromptRunContext prun_ctx;
-    prun_ctx.total_tests = seeds.size() * temps.size() * test_count;
+    prun_ctx.total_tests = seeds.size() * test_count;
 
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         json expected;
@@ -1808,10 +1756,6 @@ int main(int argc, char **argv) {
         }
 
         fflush(stdout);
-
-        for (auto &temp : temps) {
-            sparams.temp = temp;
-            prun_ctx.temp = temp;
 
             for (const auto &seed_value : seeds) {
                 prun_ctx.seed = seed_value;
@@ -1888,16 +1832,15 @@ int main(int argc, char **argv) {
                                            replacer,
                                            prompt_runner_conf,
                                            prompt_test,
-                                           j_resps,
-                                           responses)) {
+                                           j_resps)) {
                         return 1;
                     }
 
-                } else if (prompt_test.find("chat") != prompt_test.end()) {
+                } else {
+
                 }
 
                 first = false;
-            }
         }
     }
 
@@ -1906,15 +1849,6 @@ int main(int argc, char **argv) {
     std::string model_file = params.model.c_str();
     model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
     printf("model: %s\n", model_file.c_str());
-
-    for (auto resp : responses) {
-        printf("%s\n", resp.c_str());
-    }
-
-    std::string responses_json_dump =
-        j_resps.dump(2, ' ', false, json::error_handler_t::replace);
-    printf("%s\n", responses_json_dump.c_str());
-    fflush(stdout);
 
     json j_params = sparams_to_json(sparams);
     j_params["rope_freq_base"] = params.rope_freq_base;
