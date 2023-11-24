@@ -176,7 +176,7 @@ int main(int argc, char **argv) {
         return false;
     }
 
-    llama_kv_cache_debug_print(ctx, "Z");
+//    llama_kv_cache_debug_print(ctx, "Z");
 
     // start sampling from the last position of [prompt1 + mid + tokens(" the")]
     int p1 = mid_len + offs + batch_compl.n_tokens;
@@ -205,7 +205,7 @@ int main(int argc, char **argv) {
         sample_idx = 0;
     }
 
-    llama_kv_cache_debug_print(ctx, "E");
+//    llama_kv_cache_debug_print(ctx, "E");
 
     llama_batch_free(batch1);
     llama_batch_free(batch2);
