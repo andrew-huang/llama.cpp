@@ -905,6 +905,8 @@ struct Character {
         replacer.add_extra("\\{BOT\\}", name);
         replacer.add_extra("\\{char\\}", name);
         replacer.add_extra("\\{CHAR\\}", name);
+        replacer.add_extra("\\{\\{char\\}\\}", name);
+        replacer.add_extra("\\{\\{CHAR\\}\\}", name);
         replacer.add_extra("\\{user\\}", other_name);
         replacer.add_extra("\\{USER\\}", other_name);
         replacer.add_extra("\\{\\{user\\}\\}", other_name);
