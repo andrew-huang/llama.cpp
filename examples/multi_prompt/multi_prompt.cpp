@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
         return false;
     }
 
-    llama_kv_cache_debug_print(ctx, "Z");
+//    llama_kv_cache_debug_print(ctx, "Z");
 
     // start sampling from the last position of [prompt1 + mid + tokens(" the")]
     seq0_p1 = batch1_len + batch_compl.n_tokens;
@@ -167,7 +167,7 @@ int main(int argc, char **argv) {
     int p1_compl = seq0_p1;
     printf("Completion [p0=%d,p1=%d): {%s}\n", p0_compl, p1_compl, completion.c_str());
 
-    llama_kv_cache_debug_print(ctx, "E");
+//    llama_kv_cache_debug_print(ctx, "E");
 
     llama_batch_free(batch1);
     llama_batch_free(batch2);

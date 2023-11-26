@@ -770,6 +770,23 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
+        int prev_add = 0;
+        std::string prev_name = sequences[sidx].prev_name;
+        if (prev_name.size() > 0) {
+            prev_add = get_sequence_token_count(prev_name);
+        }
+
+        return prev_add + (int)seq->tokens.size();
+    }
+
+
+    int get_sequence_token_count_no_prev(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return 0;
+        }
+        Sequence *seq = &sequences[sidx];
+
         return (int)seq->tokens.size();
     }
 
@@ -1462,8 +1479,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     prompt_collection["end_reason"] = end_reason;
 
     j_resps.push_back(make_response(prun_ctx,
-                                    infer.get_sequence_text_no_prev("log"),
-                                    infer.get_sequence_token_count("log"),
+                                    conversation.chatlog_text(),
+                                    infer.current_max_seq_token_count(),
                                     prompt_collection));
 
     return true;
@@ -1590,7 +1607,7 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
     j_resps.push_back(
         make_response(prun_ctx,
                       infer.get_sequence_text_no_prev("base_prompt"),
-                      infer.get_sequence_token_count("base_prompt"),
+                      infer.get_sequence_token_count_no_prev("base_prompt"),
                       prompt_collection));
 
     return true;
