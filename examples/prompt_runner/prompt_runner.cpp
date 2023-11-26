@@ -154,10 +154,7 @@ struct PromptRunContext {
     size_t prompt_token_cnt;
 
     PromptRunContext()
-        : cur_test_nr(0),
-          total_tests(0),
-          seed(0),
-          prompt_token_cnt(0) {}
+        : cur_test_nr(0), total_tests(0), seed(0), prompt_token_cnt(0) {}
 };
 
 json make_token_respose(PromptRunContext &prc, json tokens);
@@ -1123,7 +1120,6 @@ struct Conversation {
         printf("WROTE FILE %s\n", out_file_name.c_str());
         fflush(stdout);
 
-
         json chatlog;
         chatlog["model_file"] = model_file;
         chatlog["sampling"] = sinfo;
@@ -1131,7 +1127,7 @@ struct Conversation {
         chatlog["timestamp"] = std::to_string(time(NULL));
         chatlog["time"] = now_timestr();
         std::string jout_file_name = "chatlog_" + model_file + "_" + test_id +
-                                    "_" + std::to_string(time(NULL)) + ".json";
+                                     "_" + std::to_string(time(NULL)) + ".json";
         std::ofstream joutf(jout_file_name);
         joutf << chatlog.dump(2, ' ', false, json::error_handler_t::replace);
         joutf.close();
@@ -1346,8 +1342,11 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     int prompt_max_len = 3900;
 
     for (int i = 0; i < conversation.chat_turns(); i++) {
-        if (infer.current_max_seq_token_count() > prompt_max_len) {
-            end_reason = "context limit reached: " + std::to_string(prompt_max_len);
+        bool user_max_tokens = infer.get_sequence_token_count("user") > prompt_max_len;
+        bool char_max_tokens = infer.get_sequence_token_count("char") > prompt_max_len;
+        if (user_max_tokens && char_max_tokens) {
+            end_reason =
+                "context limit reached: " + std::to_string(prompt_max_len);
             break;
         }
 
@@ -1396,24 +1395,29 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
         std::replace(print_gen.begin(), print_gen.end(), '\t', '/');
 
-        float chat_fraction = ((float) i) / ((float) conversation.chat_turns());
+        float chat_fraction = ((float)i) / ((float)conversation.chat_turns());
         int passed_time = time(NULL) - benchmark_start_time;
-        float passed_tests_f = (((float)(prun_ctx.cur_test_nr - 1)) + chat_fraction);
-        float time_per_test = passed_tests_f > 0.01 ? ((float)passed_time) / passed_tests_f : 0.0;
+        float passed_tests_f =
+            (((float)(prun_ctx.cur_test_nr - 1)) + chat_fraction);
+        float time_per_test =
+            passed_tests_f > 0.01 ? ((float)passed_time) / passed_tests_f : 0.0;
         float remaining =
             time_per_test * (((float)prun_ctx.total_tests) - passed_tests_f);
         remaining /= 60.0;
 
         float passed_time_mins = ((float)passed_time) / 60.0;
 
-        printf("[test_id=%s, eta=%5.1fm, t=%5.1fm, seed=%ld, test_nr=%d, total_tests=%d, cur_turn=%d, turns=%d, plen=%d, pmax=%d]: %s\n",
+        printf(
+            "[test_id=%s, eta=%5.1fm, t=%5.1fm, seed=%ld, test_nr=%d, "
+            "total_tests=%d, cur_turn=%d, turns=%d, plen=%d, pmax=%d]: %s\n",
             prun_ctx.test_id.c_str(),
             remaining,
             passed_time_mins,
             prun_ctx.seed,
             prun_ctx.cur_test_nr,
             prun_ctx.total_tests,
-            i, conversation.chat_turns(),
+            i,
+            conversation.chat_turns(),
             infer.current_max_seq_token_count(),
             prompt_max_len,
             print_gen.c_str());
@@ -1502,7 +1506,7 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
 
     json raw_chatlog;
 
-        int prompt_max_len = 3900;
+    int prompt_max_len = 3900;
 
     for (int i = 0; i < conversation.chat_turns(); i++) {
         printf("SEQ[log %d]=%s\n",
@@ -1510,7 +1514,8 @@ bool chatlog_generator_slow(PromptRunContext &prun_ctx,
                infer.get_sequence_text("base_prompt").c_str());
 
         if (infer.current_max_seq_token_count() > prompt_max_len) {
-            end_reason = "context limit reached: " + std::to_string(prompt_max_len);
+            end_reason =
+                "context limit reached: " + std::to_string(prompt_max_len);
             break;
         }
 
@@ -1621,8 +1626,12 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    LOG_TEE("%s: build = %d (%s)\n",      __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);
-    LOG_TEE("%s: built with %s for %s\n", __func__, LLAMA_COMPILER, LLAMA_BUILD_TARGET);
+    LOG_TEE(
+        "%s: build = %d (%s)\n", __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);
+    LOG_TEE("%s: built with %s for %s\n",
+            __func__,
+            LLAMA_COMPILER,
+            LLAMA_BUILD_TARGET);
 
     if (params.seed == LLAMA_DEFAULT_SEED) {
         params.seed = time(NULL);
@@ -1758,90 +1767,88 @@ int main(int argc, char **argv) {
 
         fflush(stdout);
 
-            for (const auto &seed_value : seeds) {
-                prun_ctx.seed = seed_value;
-                llama_set_rng_seed(ctx, prun_ctx.seed);
+        for (const auto &seed_value : seeds) {
+            prun_ctx.seed = seed_value;
+            llama_set_rng_seed(ctx, prun_ctx.seed);
 
-                prun_ctx.cur_test_nr += 1;
+            prun_ctx.cur_test_nr += 1;
 
-                if (params.prompt.empty()) {
-                    fprintf(stderr, "No prompt given!");
+            if (params.prompt.empty()) {
+                fprintf(stderr, "No prompt given!");
+                return 1;
+            }
+
+            embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos, true);
+
+            const int n_ctx = llama_n_ctx(ctx);
+            prun_ctx.prompt_token_cnt = embd_inp.size();
+
+            if (((int)embd_inp.size() + (int)params.n_predict) > n_ctx - 4) {
+                fprintf(stderr,
+                        "%s: error: prompt is too long (%d tokens, %d "
+                        "predict, max %d)\n",
+                        __func__,
+                        (int)embd_inp.size(),
+                        (int)params.n_predict,
+                        n_ctx - 4);
+                return 1;
+            }
+
+            if (first) {
+                fprintf(stderr,
+                        "sampling: \n%s\n",
+                        llama_sampling_print(sparams).c_str());
+            }
+
+            if (prompt_test.find("query") != prompt_test.end()) {
+                // "query": {
+                //   "sampling": { "tfs-z": 0.95, "temp": 0.9 } },
+                //   "replacements": [
+                //      ["<U>", "<USER>:"],
+                //      ["<C>", "<USER>:"],
+                //   ],
+                //   "messages": [
+                //       {"msg":"<C> *<CHAR> sits in a library*"},
+                //       {"msg":"<U> Hey <CHAR> *waves* I heard you had
+                //       birthday, how old did you get?"},
+                //       {"msg":"<C> Hi <USER>, yes I got",
+                //        "query_id": "age"
+                //        "msg_postfix": "years old.",
+                //        "complete": { "n_gen": 10, "bnf": "\" \"?
+                //        [1-9][0-9]*" },
+                //       },
+                //       {"msg":"<U> Amazing! You got new clothes I see,
+                //       what are you wearing?"},
+                //       {"msg":"<C> Right now I am wearing",
+                //        "query_id": "clothes"
+                //        "msg_postfix": ".",
+                //        "complete": { "n_gen": 10, "top-k": 10, "dfs":
+                //        true }
+                //       },
+                //   ],
+                // }
+                //
+                // "age" would result in a multiplied probability of the
+                // resulting answer. "clothes" would be a list of answers,
+                // each with their multiplied probabilty.
+
+            } else if (prompt_test.find("chat") != prompt_test.end()) {
+                Inference infer(sparams, params.n_batch);
+
+                if (!chatlog_generator(prun_ctx,
+                                       params,
+                                       infer,
+                                       replacer,
+                                       prompt_runner_conf,
+                                       prompt_test,
+                                       j_resps)) {
                     return 1;
                 }
 
-                embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos, true);
+            } else {
+            }
 
-                const int n_ctx = llama_n_ctx(ctx);
-                prun_ctx.prompt_token_cnt = embd_inp.size();
-
-                if (((int)embd_inp.size() + (int)params.n_predict) >
-                    n_ctx - 4) {
-                    fprintf(stderr,
-                            "%s: error: prompt is too long (%d tokens, %d "
-                            "predict, max %d)\n",
-                            __func__,
-                            (int)embd_inp.size(),
-                            (int)params.n_predict,
-                            n_ctx - 4);
-                    return 1;
-                }
-
-                if (first) {
-                    fprintf(stderr,
-                            "sampling: \n%s\n",
-                            llama_sampling_print(sparams).c_str());
-                }
-
-                if (prompt_test.find("query") != prompt_test.end()) {
-                    // "query": {
-                    //   "sampling": { "tfs-z": 0.95, "temp": 0.9 } },
-                    //   "replacements": [
-                    //      ["<U>", "<USER>:"],
-                    //      ["<C>", "<USER>:"],
-                    //   ],
-                    //   "messages": [
-                    //       {"msg":"<C> *<CHAR> sits in a library*"},
-                    //       {"msg":"<U> Hey <CHAR> *waves* I heard you had
-                    //       birthday, how old did you get?"},
-                    //       {"msg":"<C> Hi <USER>, yes I got",
-                    //        "query_id": "age"
-                    //        "msg_postfix": "years old.",
-                    //        "complete": { "n_gen": 10, "bnf": "\" \"?
-                    //        [1-9][0-9]*" },
-                    //       },
-                    //       {"msg":"<U> Amazing! You got new clothes I see,
-                    //       what are you wearing?"},
-                    //       {"msg":"<C> Right now I am wearing",
-                    //        "query_id": "clothes"
-                    //        "msg_postfix": ".",
-                    //        "complete": { "n_gen": 10, "top-k": 10, "dfs":
-                    //        true }
-                    //       },
-                    //   ],
-                    // }
-                    //
-                    // "age" would result in a multiplied probability of the
-                    // resulting answer. "clothes" would be a list of answers,
-                    // each with their multiplied probabilty.
-
-                } else if (prompt_test.find("chat") != prompt_test.end()) {
-                    Inference infer(sparams, params.n_batch);
-
-                    if (!chatlog_generator(prun_ctx,
-                                           params,
-                                           infer,
-                                           replacer,
-                                           prompt_runner_conf,
-                                           prompt_test,
-                                           j_resps)) {
-                        return 1;
-                    }
-
-                } else {
-
-                }
-
-                first = false;
+            first = false;
         }
     }
 
