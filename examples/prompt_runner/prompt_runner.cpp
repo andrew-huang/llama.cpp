@@ -45,6 +45,7 @@ using json = nlohmann::json;
 
 static llama_context **g_ctx;
 static llama_model **g_model;
+static bool g_verbose;
 
 static size_t benchmark_start_time;
 
@@ -677,17 +678,18 @@ struct Inference {
         }
 
         llama_batch_free(batch);
-
-        printf(
-            "COMPLETE SEQUENCE[%s: %s] seq_id=%d, p0=%d, p1=%d, size=%d, "
-            "n_gen=%d\n",
-            seq->name.c_str(),
-            text.c_str(),
-            seq->seq_id,
-            seq->p0,
-            seq->p1,
-            (int)seq->tokens.size(),
-            n_remain);
+        if (g_verbose) {
+            printf(
+                "COMPLETE SEQUENCE[%s: %s] seq_id=%d, p0=%d, p1=%d, size=%d, "
+                "n_gen=%d\n",
+                seq->name.c_str(),
+                text.c_str(),
+                seq->seq_id,
+                seq->p0,
+                seq->p1,
+                (int)seq->tokens.size(),
+                n_remain);
+        }
 
         int gen_count = 0;
         while (n_remain > 0) {
@@ -1443,7 +1445,6 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             user_first_msg = conversation.c_user.first_message;
             completion_start = completion_start + " " + user_first_msg;
         }
-        printf("COMPLSTART[%s]\n", completion_start.c_str());
 
         if (!infer.complete(sequence_name,
                             completion_start,
@@ -1469,7 +1470,6 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             completion = user_first_msg + completion;
         }
         infer.rewind(sequence_name);
-        printf("COMPLEND[%s]\n", completion.c_str());
 
         int fixed_quote_len = -1;
         cleanup_unbalanced(completion, '"', fixed_quote_len);
@@ -1576,6 +1576,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
 
 int main(int argc, char **argv) {
     gpt_params params;
+
+    g_verbose = false;
 
     if (gpt_params_parse(argc, argv, params) == false) {
         return 1;
@@ -1723,6 +1725,8 @@ int main(int argc, char **argv) {
     PromptRunContext prun_ctx;
     prun_ctx.total_tests = seeds.size() * test_count;
 
+    g_verbose = params.verbose_prompt;
+
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         json expected;
         if (prompt_test.find("expected") != prompt_test.end()) {
@@ -1736,7 +1740,7 @@ int main(int argc, char **argv) {
             replacer.apply_replacements(prompt_test, "<PROMPT>");
         rtrim_nl(prompt);
 
-        if (params.verbose_prompt) {
+        if (g_verbose) {
             printf(
                 "PROMPT------------------------\n%s\n--------------------------"
                 "---\n",
