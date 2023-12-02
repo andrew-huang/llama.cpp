@@ -96,6 +96,37 @@ static std::string tokens_to_output_formatted_string(const llama_context *ctx,
     return out;
 }
 
+void j2i(json map, const std::string &lbl, int32_t &out);
+void j2i(json map, const std::string &lbl, int32_t &out) {
+    if (map.find(lbl) != map.end()) {
+        out = map.value(lbl, 0);
+    }
+}
+
+void j2f(json map, const std::string &lbl, float &out);
+void j2f(json map, const std::string &lbl, float &out) {
+    if (map.find(lbl) != map.end()) {
+        out = map.value(lbl, 0.0);
+    }
+}
+
+void json_to_sparams(json sampling, llama_sampling_params &sp);
+void json_to_sparams(json sampling, llama_sampling_params &sp) {
+    j2i(sampling, "top_k", sp.top_k);
+    j2f(sampling, "top_p", sp.top_p);
+    j2f(sampling, "tfs_z", sp.tfs_z);
+    j2f(sampling, "min_p", sp.min_p);
+    j2f(sampling, "typical_p", sp.typical_p);
+    j2f(sampling, "temp", sp.temp);
+    j2f(sampling, "penalty_present", sp.penalty_present);
+    j2f(sampling, "penalty_freq", sp.penalty_freq);
+    j2i(sampling, "penalty_last_n", sp.penalty_last_n);
+    j2f(sampling, "penalty_repeat", sp.penalty_repeat);
+    j2i(sampling, "mirostat", sp.mirostat);
+    j2f(sampling, "mirostat_tau", sp.mirostat_tau);
+    j2f(sampling, "mirostat_eta", sp.mirostat_eta);
+}
+
 json sparams_to_json(llama_sampling_params &sp);
 json sparams_to_json(llama_sampling_params &sp) {
     // clang-format off
@@ -125,8 +156,8 @@ json sparams_to_json(llama_sampling_params &sp) {
     j_params["temp"] = sp.temp;
     j_params["penalty_present"] = sp.penalty_present;
     j_params["penalty_freq"] = sp.penalty_freq;
-    j_params["repeat_last_n"] = sp.penalty_last_n;
-    j_params["repeat_penality"] = sp.penalty_repeat;
+    j_params["penalty_last_n"] = sp.penalty_last_n;
+    j_params["penalty_repeat"] = sp.penalty_repeat;
     j_params["mirostat"] = sp.mirostat;
     j_params["mirostat_tau"] = sp.mirostat_tau;
     j_params["mirostat_eta"] = sp.mirostat_eta;
@@ -499,12 +530,13 @@ struct Inference {
 
     int n_batch;
     std::vector<Sequence> sequences;
+    llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
 
-    Inference(llama_sampling_params &sparams, int nb)
-        : cur_seq_id(0), n_batch(nb) {
+    Inference(llama_sampling_params &sp, int nb)
+        : cur_seq_id(0), n_batch(nb), sparams(sp) {
         llama_kv_cache_clear(*g_ctx);
-        ctx_sampling = llama_sampling_init(sparams);
+        ctx_sampling = llama_sampling_init(sp);
     }
 
     void reset_seed(int seed) {
@@ -1231,7 +1263,7 @@ llama_token generate_sample_seeded(json &j_resps,
                                    struct llama_sampling_context *ctx_sampling);
 
 llama_token generate_sample_seeded(
-    json j_resps,
+    json &j_resps,
     std::vector<int64_t> &sample_seeds,
     PromptRunContext &prc,
     struct llama_sampling_context *ctx_sampling) {
@@ -1515,7 +1547,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         is_user = !is_user;
     }
 
-    llama_sampling_params &sparams = params.sparams;
+    llama_sampling_params &sparams = infer.sparams;
 
     std::string model_file = params.model.c_str();
     model_file = model_file.substr(model_file.find_last_of("/\\") + 1);
@@ -1523,6 +1555,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         prun_ctx.seed, model_file, prompt_test, sparams);
 
     json prompt_collection;
+    prompt_collection["sampler"] = sparams_to_json(sparams);
     prompt_collection["char"] = infer.get_sequence_text("user");
     prompt_collection["user"] = infer.get_sequence_text("char");
     prompt_collection["chatlog"] = conversation.chatlog_as_json();
@@ -1548,7 +1581,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    llama_sampling_params &sparams = params.sparams;
+    llama_sampling_params sparams = params.sparams;
 
     if (!sparams.grammar.empty()) {
         grammar_parser::parse_state parsed_grammar;
@@ -1739,11 +1772,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
 
+            llama_sampling_params test_sparams = sparams;
+
+            if (prompt_test.find("sampler") != prompt_test.end()) {
+                json_to_sparams(prompt_test["sampler"], test_sparams);
+            }
+
             if (first) {
                 fprintf(stderr,
                         "sampling: \n%s\n",
-                        llama_sampling_print(sparams).c_str());
+                        llama_sampling_print(test_sparams).c_str());
             }
+
 
             if (prompt_test.find("query") != prompt_test.end()) {
                 // "query": {
@@ -1778,7 +1818,7 @@ int main(int argc, char **argv) {
                 // each with their multiplied probabilty.
 
             } else if (prompt_test.find("chat") != prompt_test.end()) {
-                Inference infer(sparams, params.n_batch);
+                Inference infer(test_sparams, params.n_batch);
 
                 if (!chatlog_generator(prun_ctx,
                                        params,
