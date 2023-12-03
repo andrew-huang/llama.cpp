@@ -1427,9 +1427,9 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
 
         std::string sequence_name = is_user ? "user" : "char";
 
-        printf("SEQ[log %d]=%s\n",
-               infer.current_max_seq_token_count(),
-               infer.get_sequence_text(sequence_name).c_str());
+        // printf("SEQ[log %d]=%s\n",
+        //        infer.current_max_seq_token_count(),
+        //        infer.get_sequence_text(sequence_name).c_str());
         fflush(stdout);
 
         infer.reset_seed(prun_ctx.seed + i + reroll);
