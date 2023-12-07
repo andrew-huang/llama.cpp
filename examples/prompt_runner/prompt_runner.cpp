@@ -110,6 +110,12 @@ void j2f(json map, const std::string &lbl, float &out) {
         out = map.value(lbl, 0.0);
     }
 }
+void j2s(json map, const std::string &lbl, std::string &out);
+void j2s(json map, const std::string &lbl, std::string &out) {
+    if (map.find(lbl) != map.end()) {
+        out = map.value(lbl, 0.0);
+    }
+}
 
 void json_to_sparams(json sampling, llama_sampling_params &sp);
 void json_to_sparams(json sampling, llama_sampling_params &sp) {
@@ -126,6 +132,7 @@ void json_to_sparams(json sampling, llama_sampling_params &sp) {
     j2i(sampling, "mirostat", sp.mirostat);
     j2f(sampling, "mirostat_tau", sp.mirostat_tau);
     j2f(sampling, "mirostat_eta", sp.mirostat_eta);
+    j2s(sampling, "order", sp.samplers_sequence);
 }
 
 json sparams_to_json(llama_sampling_params &sp);
@@ -163,6 +170,8 @@ json sparams_to_json(llama_sampling_params &sp) {
     j_params["mirostat_tau"] = sp.mirostat_tau;
     j_params["mirostat_eta"] = sp.mirostat_eta;
     j_params["penalize_nl"] = sp.penalize_nl;
+    j_params["order"] = sp.samplers_sequence;
+    j_params["order_text"] = llama_sampling_order_print(sp);
 
     return j_params;
 }
@@ -1851,7 +1860,14 @@ int main(int argc, char **argv) {
     j_params["rope_freq_base"] = params.rope_freq_base;
     j_params["rope_freq_scale"] = params.rope_freq_scale;
 
+    json build_info;
+    build_info["build"] = LLAMA_BUILD_NUMBER;
+    build_info["commit"] = LLAMA_COMMIT;
+    build_info["compiler"] = LLAMA_COMPILER;
+    build_info["build_target"] = LLAMA_BUILD_TARGET;
+
     json results;
+    results["llama_cpp_build_info"] = build_info;
     results["params"] = j_params;
     results["model_file"] = model_file;
     results["prompt"] = std::string(params.prompt);
