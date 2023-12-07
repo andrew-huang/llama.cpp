@@ -159,10 +159,11 @@ json make_token_respose(std::vector<std::string> &responses,
 }
 
 json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt, json prompt);
+                   const std::string gen, int gen_tok_cnt, json prompt, json sparams_json);
 
 json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
-                   const std::string gen, int gen_tok_cnt, json prompt) {
+                   const std::string gen, int gen_tok_cnt, json prompt, json sparams_json) {
+
     std::ostringstream oss;
     oss << std::setprecision(1) << prc.temp;
     std::string temp_str = oss.str();
@@ -205,6 +206,7 @@ json make_response(std::vector<std::string> &responses, PromptRunContext &prc,
     single_response["temp"] = temp_str;
     single_response["response"] = gen;
     single_response["expected"] = prc.expected;
+    single_response["sampler"] = sparams_json;
     single_response["prompt"] = prompt;
     single_response["prompt_token_count"] = (int)prc.prompt_token_cnt;
     single_response["generated_token_count"] = gen_tok_cnt;
@@ -299,7 +301,7 @@ struct PromptProcessor {
         }
     }
 
-    void init() { llama_kv_cache_tokens_rm(*g_ctx, -1, -1); }
+    void init() { llama_kv_cache_clear(*g_ctx); }
 
     void add_tokens(std::vector<llama_token> tokens) {
         for (auto tok : tokens) {
@@ -484,12 +486,14 @@ llama_token generate_sample_seeded(std::vector<std::string> &responses,
                                    json j_resps,
                                    std::vector<int64_t> &sample_seeds,
                                    PromptRunContext &prc,
-                                   struct llama_sampling_context *ctx_sampling);
+                                   struct llama_sampling_context *ctx_sampling,
+                                   json sparams_json);
 
 llama_token generate_sample_seeded(
     std::vector<std::string> &responses, json j_resps,
     std::vector<int64_t> &sample_seeds, PromptRunContext &prc,
-    struct llama_sampling_context *ctx_sampling) {
+    struct llama_sampling_context *ctx_sampling,
+    json sparams_json) {
     llama_token id = 0;
     for (auto seed : sample_seeds) {
         llama_set_rng_seed(*g_ctx, seed);
@@ -499,7 +503,7 @@ llama_token generate_sample_seeded(
 
         if (sample_seeds.size() > 0 && id != llama_token_eos(*g_model)) {
             std::string gen = tokens_to_output_formatted_string(*g_ctx, id);
-            j_resps.push_back(make_response(responses, prc, gen, 1, json()));
+            j_resps.push_back(make_response(responses, prc, gen, 1, json(), sparams_json));
         }
     }
 
@@ -566,6 +570,47 @@ std::string concatl(const std::vector<std::string> &l) {
         logstr += logentry;
     }
     return logstr;
+}
+
+json sparams_to_json(llama_sampling_params &sp);
+json sparams_to_json(llama_sampling_params &sp) {
+    // clang-format off
+    //    int32_t n_prev            = 64;    // number of previous tokens to remember
+    //    int32_t n_probs           = 0;     // if greater than 0, output the probabilities of top n_probs tokens.
+    //    int32_t top_k             = 40;    // <= 0 to use vocab size
+    //    float   top_p             = 0.95f; // 1.0 = disabled
+    //    float   tfs_z             = 1.00f; // 1.0 = disabled
+    //    float   typical_p         = 1.00f; // 1.0 = disabled
+    //    float   temp              = 0.80f; // 1.0 = disabled
+    //    int32_t penalty_last_n    = 64;    // last n tokens to penalize (0 = disable penalty, -1 = context size)
+    //    float   penalty_repeat    = 1.10f; // 1.0 = disabled
+    //    float   penalty_freq      = 0.00f; // 0.0 = disabled
+    //    float   penalty_present   = 0.00f; // 0.0 = disabled
+    //    int32_t mirostat          = 0;     // 0 = disabled, 1 = mirostat, 2 = mirostat 2.0
+    //    float   mirostat_tau      = 5.00f; // target entropy
+    //    float   mirostat_eta      = 0.10f; // learning rate
+    //    bool    penalize_nl       = true;  // consider newlines as a repeatable token
+    // clang-format on
+
+    json j_params;
+    j_params["top_k"] = sp.top_k;
+    j_params["top_p"] = sp.top_p;
+    j_params["min_p"] = sp.min_p;
+    j_params["tfs_z"] = sp.tfs_z;
+    j_params["typical_p"] = sp.typical_p;
+    j_params["temp"] = sp.temp;
+    j_params["penalty_present"] = sp.penalty_present;
+    j_params["penalty_freq"] = sp.penalty_freq;
+    j_params["penalty_last_n"] = sp.penalty_last_n;
+    j_params["penalty_repeat"] = sp.penalty_repeat;
+    j_params["mirostat"] = sp.mirostat;
+    j_params["mirostat_tau"] = sp.mirostat_tau;
+    j_params["mirostat_eta"] = sp.mirostat_eta;
+    j_params["penalize_nl"] = sp.penalize_nl;
+    j_params["order"] = sp.samplers_sequence;
+    j_params["order_text"] = llama_sampling_order_print(sp);
+
+    return j_params;
 }
 
 int main(int argc, char **argv) {
@@ -778,6 +823,8 @@ int main(int argc, char **argv) {
         for (auto &temp : temps) {
             sparams.temp = temp;
             prun_ctx.temp = temp;
+
+            json sparams_json = sparams_to_json(sparams);
 
             for (const auto &seed_value : seeds) {
                 prun_ctx.seed = seed_value;
@@ -1009,7 +1056,7 @@ int main(int argc, char **argv) {
 
                     j_resps.push_back(
                         make_response(responses, prun_ctx, concatl(chatlog),
-                                      gen_token_count_sum, prompt_collection));
+                                      gen_token_count_sum, prompt_collection, sparams_json));
 
                 } else {
                     struct llama_sampling_context *ctx_sampling =
@@ -1037,7 +1084,7 @@ int main(int argc, char **argv) {
                         if (sample_seeds.size() > 0) {
                             id = generate_sample_seeded(responses, j_resps,
                                                         sample_seeds, prun_ctx,
-                                                        ctx_sampling);
+                                                        ctx_sampling, sparams_json);
                         } else {
                             id = llama_sampling_sample(ctx_sampling, ctx,
                                                        nullptr);
@@ -1060,7 +1107,7 @@ int main(int argc, char **argv) {
                     int gen_tok_cnt = proc.get_last_response_token_count();
 
                     j_resps.push_back(make_response(responses, prun_ctx, gen,
-                                                    gen_tok_cnt, json()));
+                                                    gen_tok_cnt, json(), sparams_json));
 
                     llama_sampling_free(ctx_sampling);
                 }
@@ -1096,7 +1143,14 @@ int main(int argc, char **argv) {
     j_params["repeat_last_n"] = sparams.penalty_last_n;
     j_params["repeat_penality"] = sparams.penalty_repeat;
 
+    json build_info;
+    build_info["build"] = LLAMA_BUILD_NUMBER;
+    build_info["commit"] = LLAMA_COMMIT;
+    build_info["compiler"] = LLAMA_COMPILER;
+    build_info["build_target"] = LLAMA_BUILD_TARGET;
+
     json results;
+    results["llama_cpp_build_info"] = build_info;
     results["params"] = j_params;
     results["model_file"] = model_file;
     results["prompt"] = std::string(params.prompt);
