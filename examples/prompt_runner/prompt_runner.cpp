@@ -1413,7 +1413,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     bool is_user = true;
     std::string end_reason;
 
-    int prompt_max_len = 3900;
+    int prompt_max_len = 3990;
 
     int rerolled_broken_quotes = 0;
     int rerolled_empty_replies = 0;
@@ -1423,7 +1423,10 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             infer.get_sequence_token_count("user") > prompt_max_len;
         bool char_max_tokens =
             infer.get_sequence_token_count("char") > prompt_max_len;
-        if (user_max_tokens && char_max_tokens) {
+        printf("###CONTEXTS user=%d, char=%d\n",
+            infer.get_sequence_token_count("user"),
+            infer.get_sequence_token_count("char"));
+        if (user_max_tokens || char_max_tokens) {
             end_reason = "context limit reached (" +
                          std::to_string(prompt_max_len) + ")";
             break;
