@@ -304,7 +304,7 @@ json make_response(PromptRunContext &prc,
     return single_response;
 }
 
-std::string trim_generated_chat_response(std::string gen);
+std::string cleanup_generated_chat_response(std::string gen);
 
 std::string cleanup_unbalanced(const std::string &str,
                                char quot,
@@ -321,6 +321,7 @@ std::string cleanup_unbalanced(const std::string &str,
             found_open = !found_open;
         }
     }
+    //    std::string “”
     if (found_open) {
         std::string ini = str.substr(0, idx_last_quot);
         std::string o = str.substr(idx_last_quot + 1, std::string::npos);
@@ -352,12 +353,12 @@ std::string cleanup_unbalanced(const std::string &str,
     return str;
 }
 
-std::string trim_generated_chat_response(std::string gen) {
-    // Strip extra newlines:
+std::string cleanup_generated_chat_response(std::string gen) {
     gen = std::regex_replace(gen, std::regex("^:", std::regex::extended), "");
     int flen = 0;
     gen = cleanup_unbalanced(gen, '*', flen);
     gen = cleanup_unbalanced(gen, '"', flen);
+    // Strip extra newlines:
     gen = std::regex_replace(
         gen, std::regex("\n\n\n*", std::regex::extended), "\n");
     // gen = std::regex_replace(
@@ -475,35 +476,66 @@ struct Inference {
         std::vector<llama_token> tokens;
         // for rewinding
         int recent_add_tokens;
+        int base_tokens;
+        bool base_committed;
 
-        Sequence() : p0(0), p1(0), seq_id(0), recent_add_tokens(0) {}
+        Sequence()
+            : p0(0),
+              p1(0),
+              seq_id(0),
+              recent_add_tokens(0),
+              base_tokens(0),
+              base_committed(false) {}
 
         void commit() { recent_add_tokens = 0; }
 
-        void add_token(llama_token tok, int new_p1 = -1) {
-            if (new_p1 > 0) {
-                if ((p1 + 1) != new_p1) {
-                    printf(
-                        "WARNING: Sequence gets appended unconnected token! %d "
-                        "!= %d (%s)\n",
-                        p1 + 1,
-                        new_p1,
-                        recent_string().c_str());
-                }
-                p1 = new_p1;
-            } else {
-                p1 += 1;
-            }
+        void commit_base() { base_committed = true; }
+
+        void add_token(llama_token tok) {
+            p1 += 1;
             tokens.push_back(tok);
             recent_add_tokens += 1;
+
+            if (!base_committed) {
+                base_tokens += 1;
+            }
         }
 
-        void rewind() {
-            llama_kv_cache_seq_rm(*g_ctx, seq_id, p1 - recent_add_tokens, p1);
+        void _rewind_by(int n) {
+            llama_kv_cache_seq_rm(*g_ctx, seq_id, p1 - n, p1);
             for (int i = 0; i < recent_add_tokens; i++) {
                 tokens.pop_back();
                 p1 -= 1;
             }
+        }
+
+        void remove_n_tokens_after_base(int n) {
+            int base_len = base_tokens;
+            if (!base_committed) base_len = 0;
+
+            int p1_start_seq = p0 + base_len;
+
+            llama_kv_cache_seq_rm(
+                *g_ctx, seq_id, p1_start_seq, p1_start_seq + n);
+            int p1_rest = p1_start_seq + n;
+            llama_kv_cache_seq_shift(*g_ctx, seq_id, p1_rest, p1, -n);
+            p1 -= n;
+        }
+
+        void rewind_to_base() {
+            int base_len = base_tokens;
+            if (!base_committed) base_len = 0;
+
+            int cur_toks = (int)tokens.size();
+            if (cur_toks < base_len) {
+                return;
+            }
+
+            _rewind_by(cur_toks - base_tokens);
+        }
+
+        void rewind() {
+            _rewind_by(recent_add_tokens);
             recent_add_tokens = 0;
         }
 
@@ -644,6 +676,13 @@ struct Inference {
         }
 
         return -1;
+    }
+
+    void commit_base(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx >= 0) {
+            sequences[sidx].commit_base();
+        }
     }
 
     void commit(const std::string &name) {
@@ -897,6 +936,32 @@ struct Inference {
         return true;
     }
 
+    bool remove_and_shift_seq(const std::string &name, int delete_token_count) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        seq->remove_n_tokens_after_base(delete_token_count);
+
+        return true;
+    }
+
+    bool rewind_to_base(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        if (sidx < 0) {
+            return false;
+        }
+        Sequence *seq = &sequences[sidx];
+
+        // llama_kv_cache_debug_print(*g_ctx, "bef_rewind");
+        seq->rewind_to_base();
+        // llama_kv_cache_debug_print(*g_ctx, "aft_rewind");
+
+        return true;
+    }
+
     bool append(const std::string &name, const std::string &text) {
         int sidx = get_sequence_idx(name);
         Sequence *s = nullptr;
@@ -1099,7 +1164,7 @@ struct Conversation {
                                          int prompt_token_count) {
         std::string cleaned;
         stop_seq.trim_stop_sequence(resp, cleaned);
-        cleaned = trim_generated_chat_response(cleaned);
+        cleaned = cleanup_generated_chat_response(cleaned);
 
         trim_nl(cleaned, " \r\n");
 
@@ -1413,6 +1478,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     bool is_user = true;
     std::string end_reason;
 
+    // TODO: Grab this limit from the JSON
     int prompt_max_len = 3990;
 
     int rerolled_broken_quotes = 0;
@@ -1424,8 +1490,34 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         bool char_max_tokens =
             infer.get_sequence_token_count("char") > prompt_max_len;
         printf("###CONTEXTS user=%d, char=%d\n",
-            infer.get_sequence_token_count("user"),
-            infer.get_sequence_token_count("char"));
+               infer.get_sequence_token_count("user"),
+               infer.get_sequence_token_count("char"));
+
+        // TODO: Infinite chatlog:
+        // - add commit_base() to "user" and "char"
+        // if high water mark reached:
+        // - two strategies:
+        //     entry-count) shift off the first N chatlog entries
+        //                  (best is to use even Ns)
+        //     low-water-mark) shift off N*2 chatlog entries until the low water
+        //                     mark of tokens is reached.
+        // - rewind_to_base("user") rewind_to_base("char")
+        // - infer.append("user", chatlog_text())
+        // - infer.append("char", chatlog_text())
+        // continue like before.
+
+        // TODO: Infinite chatlog:
+        // - add commit_base() to "user" and "char"
+        // - two strategies:
+        //     entry-count) shift off the first N chatlog entries
+        //                  (best is to use even Ns)
+        //     low-water-mark) shift off N*2 chatlog entries until the low water
+        //                     mark of tokens is reached.
+        // - n_tok = get tokens count from chatlog
+        // - use remove_and_shift_seq("user", n_tok)
+        // - use remove_and_shift_seq("char", n_tok)
+        // - continue like before
+
         if (user_max_tokens || char_max_tokens) {
             end_reason = "context limit reached (" +
                          std::to_string(prompt_max_len) + ")";
@@ -1485,7 +1577,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
 
         int fixed_quote_len = -1;
         cleanup_unbalanced(completion, '"', fixed_quote_len);
-        if (fixed_quote_len > -1 && fixed_quote_len < 5) {
+        if (fixed_quote_len > -1 && fixed_quote_len < 10) {
             printf("REROLL\n");
             rerolled_broken_quotes++;
             reroll++;
@@ -1799,7 +1891,6 @@ int main(int argc, char **argv) {
                         "sampling: \n%s\n",
                         llama_sampling_print(test_sparams).c_str());
             }
-
 
             if (prompt_test.find("query") != prompt_test.end()) {
                 // "query": {
