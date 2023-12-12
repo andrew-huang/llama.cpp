@@ -355,22 +355,26 @@ std::string cleanup_unbalanced(const std::string &str,
 
 std::string cleanup_generated_chat_response(std::string gen) {
     gen = std::regex_replace(gen, std::regex("^:", std::regex::extended), "");
+
     int flen = 0;
     gen = cleanup_unbalanced(gen, '*', flen);
     gen = cleanup_unbalanced(gen, '"', flen);
-    // Strip extra newlines:
+
+    // remove newlines front/end:
+    trim_nl(gen, " \r\n");
+
+    // remove newlines in the middle:
     gen = std::regex_replace(
-        gen, std::regex("\n\n\n*", std::regex::extended), "\n");
-    // gen = std::regex_replace(
-    //     gen, std::regex("\\.\\.\\.*", std::regex::extended), "");
-    // gen = std::regex_replace(
-    //     gen, std::regex("\\*\\*\\**", std::regex::extended), "");
+        gen, std::regex("\n\n*", std::regex::extended), " ");
+
     // Strip trailing cutted sentences:
     gen = std::regex_replace(
         gen,
         std::regex("^(.*[.!?*\")}`$])[^.!?*\")}`$]*$", std::regex::extended),
         "$1");
-    trim_nl(gen, " \r\n");
+    // remove spaces
+    trim_nl(gen, " ");
+
     return gen;
 }
 
@@ -515,6 +519,12 @@ struct Inference {
 
             int p1_start_seq = p0 + base_len;
 
+            int remove_n_toks = n;
+            while (tokens.size() > 0 && remove_n_toks > 0) {
+                tokens.erase(tokens.begin());
+                remove_n_toks--;
+            }
+
             llama_kv_cache_seq_rm(
                 *g_ctx, seq_id, p1_start_seq, p1_start_seq + n);
             int p1_rest = p1_start_seq + n;
@@ -575,8 +585,10 @@ struct Inference {
     llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
 
+    int last_append_token_count;
+
     Inference(llama_sampling_params &sp, int nb)
-        : cur_seq_id(0), n_batch(nb), sparams(sp) {
+        : cur_seq_id(0), n_batch(nb), sparams(sp), last_append_token_count(0) {
         llama_kv_cache_clear(*g_ctx);
         ctx_sampling = llama_sampling_init(sp);
     }
@@ -980,11 +992,15 @@ struct Inference {
         std::vector<llama_token> tokens;
         int new_p1 = 0;
         bool ok = load_tokens(false, text, s->seq_id, s->p1, tokens, new_p1);
+        last_append_token_count = 0;
         for (auto tok : tokens) {
             s->add_token(tok);
+            last_append_token_count++;
         }
         return ok;
     }
+
+    int get_last_append_token_count() { return last_append_token_count; }
 
     void reset_sampler(const std::string &name) {
         int sidx = get_sequence_idx(name);
@@ -1081,13 +1097,21 @@ struct Conversation {
     struct ChatlogEntry {
         int prompt_token_count;
         int reroll_count;
+        int token_count;
+        bool hidden;
         std::string text;
         std::string raw;
 
-        ChatlogEntry() : prompt_token_count(0), reroll_count(0) {}
+        ChatlogEntry()
+            : prompt_token_count(0),
+              reroll_count(0),
+              token_count(0),
+              hidden(false) {}
         ChatlogEntry(const std::string &txt) {
             prompt_token_count = 0;
             reroll_count = 0;
+            token_count = 0;
+            hidden = false;
             text = txt;
             raw = txt;
         }
@@ -1185,11 +1209,21 @@ struct Conversation {
         return entry;
     }
 
+    void set_last_chat_response_len(int n_tok) {
+        if (chatlog.size() > 0) {
+            chatlog[chatlog.size() - 1].token_count = n_tok;
+        }
+    }
+
     std::string concatl(const std::vector<ChatlogEntry> &l, bool indent) {
         std::string logstr;
         for (auto logentry : l) {
             if (indent) {
                 std::string le = logentry.text;
+                le = "(" + std::to_string(logentry.prompt_token_count) + ") " + le;
+                if (logentry.hidden) {
+                    le = "*H* " + le;
+                }
                 std::replace(le.begin(), le.end(), '\n', ' ');
                 logstr += "    " + le + "\n\n";
             } else {
@@ -1205,6 +1239,24 @@ struct Conversation {
     std::string chatlog_text() { return concatl(chatlog, false); }
 
     std::string chatlog_text_ext() { return concatl(chatlog, true); }
+
+    int hide_n_chatlog_entries(int n) {
+        int removed_tokens = 0;
+        bool hid_one = true;
+        while (hid_one && n > 0) {
+            hid_one = false;
+            for (int i = 0; i < (int)chatlog.size(); i++) {
+                if (!chatlog[i].hidden) {
+                    n--;
+                    hid_one = true;
+                    chatlog[i].hidden = true;
+                    removed_tokens += chatlog[i].token_count;
+                    break;
+                }
+            }
+        }
+        return removed_tokens;
+    }
 
     json raw_chatlog_as_json() {
         json log;
@@ -1230,6 +1282,8 @@ struct Conversation {
             entry["reroll_count"] = l.reroll_count;
             entry["text"] = l.text;
             entry["raw"] = l.raw;
+            entry["hidden"] = l.hidden;
+            entry["token_count"] = l.token_count;
             log.push_back(entry);
         }
         return log;
@@ -1461,6 +1515,9 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         return false;
     }
 
+    infer.commit_base("char");
+    infer.commit_base("user");
+
     if (!infer.append("char", conversation.chatlog_text())) {
         fprintf(stderr, "Couldn't append chatlog\n");
         fflush(stderr);
@@ -1479,7 +1536,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     std::string end_reason;
 
     // TODO: Grab this limit from the JSON
-    int prompt_max_len = 3990;
+    int prompt_max_len = 3600;
 
     int rerolled_broken_quotes = 0;
     int rerolled_empty_replies = 0;
@@ -1519,9 +1576,15 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         // - continue like before
 
         if (user_max_tokens || char_max_tokens) {
-            end_reason = "context limit reached (" +
-                         std::to_string(prompt_max_len) + ")";
-            break;
+            int n_tok = conversation.hide_n_chatlog_entries(4);
+            infer.remove_and_shift_seq("user", n_tok);
+            infer.remove_and_shift_seq("char", n_tok);
+            printf("SHIFT by %d tokens! NEW CHATLOG[[[[\n%s\n]]]]\n",
+                   n_tok,
+                   conversation.chatlog_text_ext().c_str());
+            //            end_reason = "context limit reached (" +
+            //                         std::to_string(prompt_max_len) + ")";
+            //            break;
         }
 
         if (reroll > 10) {
@@ -1596,6 +1659,24 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             continue;
         }
 
+        if (!infer.append("user", log_entry)) {
+            fprintf(stderr, "Couldn't append chatlog\n");
+            fflush(stderr);
+            return false;
+        }
+
+        conversation.set_last_chat_response_len(
+            infer.get_last_append_token_count());
+
+        infer.commit("user");
+
+        if (!infer.append("char", log_entry)) {
+            fprintf(stderr, "Couldn't append chatlog\n");
+            fflush(stderr);
+            return false;
+        }
+        infer.commit("char");
+
         std::string print_gen = log_entry;
         std::replace(print_gen.begin(), print_gen.end(), '\r', ' ');
         std::replace(print_gen.begin(), print_gen.end(), '\n', '/');
@@ -1633,20 +1714,6 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             end_reason = "empty response";
             break;
         }
-
-        if (!infer.append("user", log_entry)) {
-            fprintf(stderr, "Couldn't append chatlog\n");
-            fflush(stderr);
-            return false;
-        }
-        infer.commit("user");
-
-        if (!infer.append("char", log_entry)) {
-            fprintf(stderr, "Couldn't append chatlog\n");
-            fflush(stderr);
-            return false;
-        }
-        infer.commit("char");
 
         is_user = !is_user;
     }
