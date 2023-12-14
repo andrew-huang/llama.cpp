@@ -1147,8 +1147,9 @@ struct Conversation {
 
     int turns;
     int prompt_limit_tok_count;
-    int shift_context_watermark;
     int shift_context_chatlog_entries;
+    int init_user_prompt_tokens;
+    int init_char_prompt_tokens;
 
     std::vector<ChatlogEntry> chatlog;
 
@@ -1158,7 +1159,6 @@ struct Conversation {
           test_replacements(test_replacement),
           turns(0),
           prompt_limit_tok_count(0),
-          shift_context_watermark(0),
           shift_context_chatlog_entries(0) {}
 
     bool load_config(json chat, int n_predict_default) {
@@ -1188,14 +1188,9 @@ struct Conversation {
                     n_predict_default);
 
         turns = chat.value("turns", 100);
-        prompt_limit_tok_count = chat.value("end_at_token_count", 3900);
-
-        if (chat.contains("shift_context")) {
-            json shiftctx = chat["shift_context"];
-            shift_context_watermark = shiftctx.value("token_watermark", 0);
-            shift_context_chatlog_entries =
-                shiftctx.value("delete_chatlog_entries", 0);
-        }
+        prompt_limit_tok_count = chat.value("context_max_limit", 3900);
+        shift_context_chatlog_entries =
+            chat.value("shift_chatlog_entries_at_context_max_limit", 0);
 
         if (c_char.first_message != "") {
             std::string entry = c_char.format_for_log(c_char.first_message);
@@ -1215,11 +1210,11 @@ struct Conversation {
         return count;
     }
     int get_shift_chatlog_entries(int prompt_token_count) {
-        if (shift_context_watermark <= 0) {
+        if (shift_context_chatlog_entries <= 0) {
             return -1;
         }
 
-        if (prompt_token_count > shift_context_watermark) {
+        if (prompt_token_count > prompt_limit()) {
             return shift_context_chatlog_entries;
         }
 
@@ -1270,12 +1265,17 @@ struct Conversation {
         return 0;
     }
 
+    void set_init_seq_lengths(int char_n_tok, int user_n_tok) {
+        init_char_prompt_tokens = char_n_tok;
+        init_user_prompt_tokens = user_n_tok;
+    }
+
     void set_last_chat_response_len(int n_tok) {
         if (chatlog.size() > 0) {
             chatlog[chatlog.size() - 1].token_count = n_tok;
 
-            int user_token_count = 0;
-            int char_token_count = 0;
+            int user_token_count = init_user_prompt_tokens;
+            int char_token_count = init_char_prompt_tokens;
             for (auto &l : chatlog) {
                 int total_token_count = user_token_count;
                 if (l.is_char) {
@@ -1601,9 +1601,6 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         return false;
     }
     infer.commit("char");
-    // Setting the chatlog length of the first message
-    conversation.set_last_chat_response_len(
-        infer.get_last_append_token_count());
 
     if (!infer.append("user", conversation.chatlog_text())) {
         fprintf(stderr, "Couldn't append chatlog\n");
@@ -1611,6 +1608,10 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         return false;
     }
     infer.commit("user");
+
+    // Set the initial length of the prompts:
+    conversation.set_init_seq_lengths(infer.get_sequence_token_count("char"),
+                                      infer.get_sequence_token_count("user"));
 
     bool is_user = true;
     std::string end_reason;
@@ -1731,9 +1732,10 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             fflush(stderr);
             return false;
         }
+        infer.commit("user");
+
         conversation.set_last_chat_response_len(
             infer.get_last_append_token_count());
-        infer.commit("user");
 
         if (!infer.append("char", log_entry)) {
             fprintf(stderr, "Couldn't append chatlog\n");
