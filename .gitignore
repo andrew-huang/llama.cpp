@@ -15,6 +15,7 @@
 .DS_Store
 .build/
 .cache/
+.ccls-cache/
 .direnv/
 .envrc
 .swiftpm
@@ -47,6 +48,8 @@ models-mnt
 /llama-bench
 /prompt_runner
 /llava
+/llava-cli
+/lookahead
 /main
 /metal
 /perplexity
@@ -64,8 +67,9 @@ models-mnt
 /speculative
 /parallel
 /train-text-from-scratch
+/tokenize
 /vdot
-build-info.h
+/common/build-info.cpp
 arm_neon.h
 compile_commands.json
 CMakeSettings.json
@@ -86,15 +90,17 @@ poetry.lock
 poetry.toml
 
 # Test binaries
-tests/test-grammar-parser
-tests/test-llama-grammar
-tests/test-double-float
-tests/test-grad0
-tests/test-opt
-tests/test-quantize-fns
-tests/test-quantize-perf
-tests/test-sampling
-tests/test-tokenizer-0-llama
-tests/test-tokenizer-0-falcon
-tests/test-tokenizer-1-llama
-tests/test-tokenizer-1-bpe
+/tests/test-grammar-parser
+/tests/test-llama-grammar
+/tests/test-double-float
+/tests/test-grad0
+/tests/test-opt
+/tests/test-quantize-fns
+/tests/test-quantize-perf
+/tests/test-sampling
+/tests/test-tokenizer-0-llama
+/tests/test-tokenizer-0-falcon
+/tests/test-tokenizer-1-llama
+/tests/test-tokenizer-1-bpe
+/tests/test-rope
+/tests/test-backend-ops

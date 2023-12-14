@@ -299,7 +299,7 @@ struct PromptProcessor {
         }
     }
 
-    void init() { llama_kv_cache_tokens_rm(*g_ctx, -1, -1); }
+    void init() { llama_kv_cache_clear(*g_ctx); }
 
     void add_tokens(std::vector<llama_token> tokens) {
         for (auto tok : tokens) {
