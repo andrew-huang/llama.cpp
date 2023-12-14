@@ -47,7 +47,6 @@ models-mnt
 /libllama.so
 /llama-bench
 /prompt_runner
-/llava
 /llava-cli
 /lookahead
 /main
