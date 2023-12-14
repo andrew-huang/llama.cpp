@@ -1,0 +1,11 @@
+---
+BasedOnStyle: Google
+IndentWidth: 4
+SortIncludes: Never
+ColumnLimit: 80
+CommentPragmas:  '/\*(.+\n.+)+\*/'
+BinPackArguments: false
+BinPackParameters: false
+ExperimentalAutoDetectBinPacking: false
+AllowAllParametersOfDeclarationOnNextLine: true
+AllowAllArgumentsOnNextLine: true
