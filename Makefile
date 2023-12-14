@@ -571,7 +571,7 @@ main: examples/main/main.cpp                                  ggml.o llama.o $(C
 	@echo '====  Run ./main -h for help.  ===='
 	@echo
 
-prompt_runner: examples/prompt_runner/prompt_runner.cpp       build-info.h ggml.o llama.o $(COMMON_DEPS) grammar-parser.o $(OBJS)
+prompt_runner: examples/prompt_runner/prompt_runner.cpp       ggml.o llama.o $(COMMON_DEPS) grammar-parser.o $(OBJS)
 	$(CXX) $(CXXFLAGS) $(filter-out %.h,$^) -o $@ $(LDFLAGS)
 
 infill: examples/infill/infill.cpp                            ggml.o llama.o $(COMMON_DEPS) console.o grammar-parser.o $(OBJS)
