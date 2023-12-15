@@ -353,8 +353,48 @@ std::string cleanup_unbalanced(const std::string &str,
     return str;
 }
 
+void replaceAll(std::string &str,
+                const std::string &from,
+                const std::string &to) {
+    if (from.empty()) return;
+    size_t start_pos = 0;
+    while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+        str.replace(start_pos, from.length(), to);
+        start_pos += to.length();  // In case 'to' contains 'from', like
+                                   // replacing 'x' with 'yx'
+    }
+}
+
+void unifyQuotes(std::string &gen) {
+    replaceAll(gen, "‚", ",");
+    replaceAll(gen, "“", "\"");
+    replaceAll(gen, "”", "\"");
+    replaceAll(gen, "‘", "'");
+    replaceAll(gen, "’", "'");
+    replaceAll(gen, "«", "\"");
+    replaceAll(gen, "»", "\"");
+    replaceAll(gen, "„", "\"");
+    replaceAll(gen, "“", "\"");
+    replaceAll(gen, "„", "\"");
+    replaceAll(gen, "”", "\"");
+    replaceAll(gen, "»", "\"");
+    replaceAll(gen, "«", "\"");
+    replaceAll(gen, "«", "\"");
+    replaceAll(gen, "»", "\"");
+    replaceAll(gen, "‘", "'");
+    replaceAll(gen, "’", "'");
+    replaceAll(gen, "‚", ",");
+    replaceAll(gen, "“", "\"");
+    replaceAll(gen, "”", "\"");
+    replaceAll(gen, "„", "\"");
+    replaceAll(gen, "‹", "'");
+    replaceAll(gen, "›", "'");
+}
+
 std::string cleanup_generated_chat_response(std::string gen) {
     gen = std::regex_replace(gen, std::regex("^:", std::regex::extended), "");
+
+    unifyQuotes(gen);
 
     int flen = 0;
     gen = cleanup_unbalanced(gen, '*', flen);
