@@ -355,6 +355,10 @@ std::string cleanup_unbalanced(const std::string &str,
 
 void replaceAll(std::string &str,
                 const std::string &from,
+                const std::string &to);
+
+void replaceAll(std::string &str,
+                const std::string &from,
                 const std::string &to) {
     if (from.empty()) return;
     size_t start_pos = 0;
@@ -365,36 +369,40 @@ void replaceAll(std::string &str,
     }
 }
 
+void unifyQuotes(std::string &gen);
 void unifyQuotes(std::string &gen) {
     replaceAll(gen, "‚", ",");
-    replaceAll(gen, "“", "\"");
-    replaceAll(gen, "”", "\"");
-    replaceAll(gen, "‘", "'");
-    replaceAll(gen, "’", "'");
-    replaceAll(gen, "«", "\"");
-    replaceAll(gen, "»", "\"");
     replaceAll(gen, "„", "\"");
-    replaceAll(gen, "“", "\"");
-    replaceAll(gen, "„", "\"");
-    replaceAll(gen, "”", "\"");
     replaceAll(gen, "»", "\"");
     replaceAll(gen, "«", "\"");
-    replaceAll(gen, "«", "\"");
-    replaceAll(gen, "»", "\"");
     replaceAll(gen, "‘", "'");
     replaceAll(gen, "’", "'");
     replaceAll(gen, "‚", ",");
     replaceAll(gen, "“", "\"");
     replaceAll(gen, "”", "\"");
-    replaceAll(gen, "„", "\"");
     replaceAll(gen, "‹", "'");
     replaceAll(gen, "›", "'");
+}
+
+bool find_any_of_in_string(const std::string &needles, const std::string &str);
+bool find_any_of_in_string(const std::string &needles, const std::string &str) {
+    for (size_t i = 0; i < needles.size(); i++) {
+        if (str.find(needles[i]) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string cleanup_generated_chat_response(std::string gen) {
     gen = std::regex_replace(gen, std::regex("^:", std::regex::extended), "");
 
     unifyQuotes(gen);
+
+    // Yep, no punctuation means: no full response => garbage
+    if (!find_any_of_in_string(".!?*\")}`$", gen)) {
+        return "";
+    }
 
     int flen = 0;
     gen = cleanup_unbalanced(gen, '*', flen);
@@ -1174,6 +1182,14 @@ struct Conversation {
         }
     };
 
+    struct RerollEntry {
+        int index;
+        int reroll_count;
+        std::string reason;
+        std::string raw;
+        RerollEntry() : index(0), reroll_count(0) {}
+    };
+
     TextReplacer replacer;
     StopSequences stop_seq;
 
@@ -1192,6 +1208,7 @@ struct Conversation {
     int init_char_prompt_tokens;
 
     std::vector<ChatlogEntry> chatlog;
+    std::vector<RerollEntry> rerolls;
 
     Conversation(TextReplacer repl, StopSequences ss, json test_replacement)
         : replacer(repl),
@@ -1298,6 +1315,18 @@ struct Conversation {
         return entry;
     }
 
+    void append_reroll(int conversation_index,
+                       int reroll_count,
+                       const std::string &reason,
+                       const std::string &raw) {
+        RerollEntry re;
+        re.index = conversation_index;
+        re.reroll_count = reroll_count;
+        re.reason = reason;
+        re.raw = raw;
+        rerolls.push_back(re);
+    }
+
     int get_total_token_count() {
         if (chatlog.size() > 0) {
             return chatlog[chatlog.size() - 1].total_token_count;
@@ -1389,6 +1418,19 @@ struct Conversation {
         return log;
     }
 
+    json rerolls_as_json() {
+        json rolls;
+        for (auto re : rerolls) {
+            json roll;
+            roll["raw"] = re.raw;
+            roll["index"] = re.index;
+            roll["count"] = re.reroll_count;
+            roll["reason"] = re.reason;
+            rolls.push_back(roll);
+        }
+        return rolls;
+    }
+
     json chatlog_as_json() {
         json log;
         for (auto l : chatlog) {
@@ -1441,6 +1483,7 @@ struct Conversation {
         chatlog["model_file"] = model_file;
         chatlog["sampling"] = sinfo;
         chatlog["chatlog"] = chatlog_as_json();
+        chatlog["rerolls"] = rerolls_as_json();
         chatlog["timestamp"] = std::to_string(time(NULL));
         chatlog["time"] = now_timestr();
         std::string jout_file_name = "chatlog_" + model_file + "_" + test_id +
@@ -1752,7 +1795,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             printf("REROLL\n");
             rerolled_broken_quotes++;
             reroll++;
-            i--;
+            conversation.append_reroll(i, reroll, "unbalanced_quote", raw);
             continue;
         }
 
@@ -1763,7 +1806,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             printf("REROLL\n");
             rerolled_empty_replies++;
             reroll++;
-            i--;
+            conversation.append_reroll(i, reroll, "incomplete_sequence", raw);
             continue;
         }
 
@@ -1842,6 +1885,7 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     prompt_collection["char"] = infer.get_sequence_text("user");
     prompt_collection["user"] = infer.get_sequence_text("char");
     prompt_collection["chatlog"] = conversation.chatlog_as_json();
+    prompt_collection["rerolls"] = conversation.rerolls_as_json();
     prompt_collection["raw_chatlog"] = conversation.raw_chatlog_as_json();
     prompt_collection["text_chatlog"] = conversation.text_chatlog_as_json();
     prompt_collection["max_token_count"] = infer.current_max_seq_token_count();
