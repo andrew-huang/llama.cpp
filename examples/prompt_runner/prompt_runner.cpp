@@ -1346,12 +1346,13 @@ struct Conversation {
             int user_token_count = init_user_prompt_tokens;
             int char_token_count = init_char_prompt_tokens;
             for (auto &l : chatlog) {
-                int total_token_count = user_token_count;
+                int total_token_count = 0;
                 if (l.is_char) {
                     char_token_count += l.token_count;
                     total_token_count = char_token_count;
                 } else {
                     user_token_count += l.token_count;
+                    total_token_count = user_token_count;
                 }
                 l.total_token_count = total_token_count;
             }
