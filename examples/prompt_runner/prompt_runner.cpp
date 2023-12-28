@@ -408,14 +408,14 @@ std::string cleanup_generated_chat_response(std::string gen) {
     gen = cleanup_unbalanced(gen, '*', flen);
     gen = cleanup_unbalanced(gen, '"', flen);
 
-    // remove newlines front/end:
+    // remove newlines and spaces front/end:
     trim_nl(gen, " \r\n");
 
     // remove newlines in the middle:
     gen =
         std::regex_replace(gen, std::regex("\n\n*", std::regex::extended), " ");
 
-    // Strip trailing cutted sentences:
+    // Strip trailing incomplete sentences:
     gen = std::regex_replace(
         gen,
         std::regex("^(.*[.!?*\")}`$])[^.!?*\")}`$]*$", std::regex::extended),
@@ -561,17 +561,21 @@ struct Inference {
             }
         }
 
-        void remove_n_tokens_after_base(int n) {
+        void remove_n_tokens_after_base(size_t n) {
             int base_len = base_tokens;
             if (!base_committed) base_len = 0;
 
             int p1_start_seq = p0 + base_len;
 
-            int remove_n_toks = n;
-            while (tokens.size() > 0 && remove_n_toks > 0) {
-                tokens.erase(tokens.begin());
-                remove_n_toks--;
+            size_t remove_n_toks = n;
+            std::vector<llama_token> new_tokens;
+            for (size_t i = 0; i < (size_t) base_len && i < tokens.size(); i++) {
+                new_tokens.push_back(tokens[i]);
             }
+            for (size_t i = ((size_t) base_len) + remove_n_toks; i < tokens.size(); i++) {
+                new_tokens.push_back(tokens[i]);
+            }
+            tokens = new_tokens;
 
             // printf("### KV RM seq=%d, p0=%d to p1=%d\n",
             //        seq_id,
@@ -760,6 +764,7 @@ struct Inference {
         int sidx = get_sequence_idx(name);
         if (sidx >= 0) {
             sequences[sidx].commit();
+            printf("COMMIT PROMPT:[%s]\n", this->get_sequence_text(name).c_str());
         }
     }
 
@@ -1014,7 +1019,7 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
-        seq->remove_n_tokens_after_base(delete_token_count);
+        seq->remove_n_tokens_after_base((size_t) delete_token_count);
 
         return true;
     }
@@ -1800,6 +1805,16 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             continue;
         }
 
+        fixed_quote_len = -1;
+        cleanup_unbalanced(completion, '*', fixed_quote_len);
+        if (fixed_quote_len > -1 && fixed_quote_len < 10) {
+            printf("REROLL\n");
+            rerolled_broken_quotes++;
+            reroll++;
+            conversation.append_reroll(i, reroll, "unbalanced_action_quote", raw);
+            continue;
+        }
+
         std::string log_entry = conversation.append_raw_chat_response(
             is_user, completion, raw, reroll, prompt_token_count);
 
@@ -1934,6 +1949,11 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    json selected_tests;
+    if (params.input_prefix != "") {
+        selected_tests = json::parse(params.input_prefix);
+    }
+
     LOG_TEE(
         "%s: build = %d (%s)\n", __func__, LLAMA_BUILD_NUMBER, LLAMA_COMMIT);
     LOG_TEE("%s: built with %s for %s\n",
@@ -2055,6 +2075,13 @@ int main(int argc, char **argv) {
 
     g_verbose = params.verbose_prompt;
 
+    if (selected_tests.size() > 0) {
+        for (const auto &sel_id : selected_tests) {
+            std::string substr_id = sel_id;
+            printf("selected test substring: %s\n", substr_id.c_str());
+        }
+    }
+
     for (const auto &prompt_test : prompt_runner_conf["prompt_tests"]) {
         json expected;
         if (prompt_test.find("expected") != prompt_test.end()) {
@@ -2063,6 +2090,21 @@ int main(int argc, char **argv) {
         prun_ctx.expected = expected;
 
         prun_ctx.test_id = prompt_test.value("id", "unknown_test_id");
+
+        if (selected_tests.size() > 0) {
+            bool any_matched = false;
+            for (const auto &sel_id : selected_tests) {
+                std::string substr_id = sel_id;
+                if (prun_ctx.test_id.find(substr_id) != std::string::npos) {
+                    any_matched = true;
+                }
+            }
+            if (!any_matched) {
+                printf("Skipped unselected test: %s\n", prun_ctx.test_id.c_str());
+                fflush(stdout);
+                continue;
+            }
+        }
 
         std::string prompt =
             replacer.apply_replacements(prompt_test, "<PROMPT>");
