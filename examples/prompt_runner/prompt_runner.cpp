@@ -982,6 +982,8 @@ struct Inference {
             float tok_p = get_token_probabilitiy(tok, sample_idx);
             const std::string piece = llama_token_to_piece(*g_ctx, tok);
 
+            // TODO: FIX the bug with the completion in first step!
+
             auto min_p_toks = get_min_p_tokens(sample_idx, 0.01, 1);
             for (auto t : min_p_toks) {
                 // TODO: REcord these minp probabilities!
