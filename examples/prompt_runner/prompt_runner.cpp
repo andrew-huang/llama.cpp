@@ -646,9 +646,9 @@ struct Inference {
 
     int n_batch;
     std::vector<Sequence> sequences;
+    std::vector<std::pair<std::string, float>> tok_probs;
     llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
-    bool record_grammar_probabilities;
 
     int last_append_token_count;
 
@@ -656,14 +656,9 @@ struct Inference {
         : cur_seq_id(0),
           n_batch(nb),
           sparams(sp),
-          record_grammar_probabilities(false),
           last_append_token_count(0) {
         llama_kv_cache_clear(*g_ctx);
         ctx_sampling = llama_sampling_init(sp);
-    }
-
-    void set_record_grammar_probabilities(bool rgp) {
-        record_grammar_probabilities = rgp;
     }
 
     void reset_seed(int seed) {
@@ -780,7 +775,7 @@ struct Inference {
         }
     }
 
-    void do_record_grammar_probabilities(int sample_idx) {
+    float get_token_probabilitiy(llama_token tok, int sample_idx) {
         const int n_vocab = llama_n_vocab(*g_model);
 
         float *logits = llama_get_logits_ith(*g_ctx, sample_idx);
@@ -793,41 +788,27 @@ struct Inference {
 
         llama_token_data_array candidates_p = {cur.data(), cur.size(), false};
 
-        llama_sample_grammar(*g_ctx, &candidates_p, ctx_sampling->grammar);
-
-        // Explicitly refuse the " " token.
-        for (size_t i = 0; i < candidates_p.size; ++i) {
-            const llama_token id = candidates_p.data[i].id;
-            const std::string piece = llama_token_to_piece(*g_ctx, id);
-            if (piece == " ") {
-                candidates_p.data[i].logit = -INFINITY;
-            }
-        }
-
         llama_sample_softmax(nullptr, &candidates_p);
 
-        json tokens;
-
         for (size_t i = 0; i < candidates_p.size; ++i) {
-            if (candidates_p.data[i].p > 0.00001) {
-                std::string tok = tokens_to_output_formatted_string(
-                    *g_ctx, candidates_p.data[i].id);
-                json j_tok;
-                j_tok[0] = tok;
-                j_tok[1] = candidates_p.data[i].p;
-                tokens.push_back(j_tok);
+            if (candidates_p.data[i].id == tok) {
+                return candidates_p.data[i].p;
             }
         }
 
-        // if (tokens.size() > 1) {
-        //     j_tok_resps.push_back(make_token_respose(prc, tokens));
-        // }
+        return -1.0;
+    }
+
+    std::vector<std::pair<std::string, float>> get_recent_tok_prob_sequence() {
+        return tok_probs;
     }
 
     bool complete(const std::string &name,
                   const std::string &text,
                   int n_remain,
                   std::function<bool(int, const std::string &)> check_for_end) {
+        tok_probs.clear();
+
         int sidx = get_sequence_idx(name);
         if (sidx < 0) {
             return false;
@@ -873,13 +854,14 @@ struct Inference {
 
         int gen_count = 0;
         while (n_remain > 0) {
-            if (record_grammar_probabilities) {
-                do_record_grammar_probabilities(sample_idx);
-            }
             llama_token tok = llama_sampling_sample(
                 ctx_sampling, *g_ctx, nullptr, sample_idx);
 
             gen_count += 1;
+
+            float tok_p = get_token_probabilitiy(tok, sample_idx);
+            const std::string piece = llama_token_to_piece(*g_ctx, tok);
+            tok_probs.push_back(std::pair<std::string, float>(piece, tok_p));
 
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
             //            printf("accept %d\n", tok);
@@ -1405,6 +1387,13 @@ struct Conversation {
         return is_user ? c_user.n_gen_tokens : c_char.n_gen_tokens;
     }
 
+    void append_tok_probabilities(
+        bool is_user,
+        std::vector<std::pair<std::string, float>> &probs)
+    {
+        // TODO: Write this down for saving via JSON or somehow else later!
+    }
+
     std::string append_raw_chat_response(bool is_user,
                                          const std::string &resp,
                                          const std::string &raw,
@@ -1904,6 +1893,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             break;
         }
 
+        std::vector<std::pair<std::string, float>> tok_compl_probs = infer.get_recent_tok_prob_sequence();
+
         int prompt_token_count = infer.get_sequence_token_count(sequence_name);
         std::string completion =
             infer.get_recently_added_tokens_str(sequence_name);
@@ -1934,6 +1925,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
                 i, reroll, "unbalanced_action_quote", raw);
             continue;
         }
+
+        conversation.append_tok_probabilities(is_user, tok_compl_probs);
 
         std::string log_entry = conversation.append_raw_chat_response(
             is_user, completion, raw, reroll, prompt_token_count);
