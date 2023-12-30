@@ -569,10 +569,12 @@ struct Inference {
 
             size_t remove_n_toks = n;
             std::vector<llama_token> new_tokens;
-            for (size_t i = 0; i < (size_t) base_len && i < tokens.size(); i++) {
+            for (size_t i = 0; i < (size_t)base_len && i < tokens.size(); i++) {
                 new_tokens.push_back(tokens[i]);
             }
-            for (size_t i = ((size_t) base_len) + remove_n_toks; i < tokens.size(); i++) {
+            for (size_t i = ((size_t)base_len) + remove_n_toks;
+                 i < tokens.size();
+                 i++) {
                 new_tokens.push_back(tokens[i]);
             }
             tokens = new_tokens;
@@ -646,13 +648,22 @@ struct Inference {
     std::vector<Sequence> sequences;
     llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
+    bool record_grammar_probabilities;
 
     int last_append_token_count;
 
     Inference(llama_sampling_params &sp, int nb)
-        : cur_seq_id(0), n_batch(nb), sparams(sp), last_append_token_count(0) {
+        : cur_seq_id(0),
+          n_batch(nb),
+          sparams(sp),
+          record_grammar_probabilities(false),
+          last_append_token_count(0) {
         llama_kv_cache_clear(*g_ctx);
         ctx_sampling = llama_sampling_init(sp);
+    }
+
+    void set_record_grammar_probabilities(bool rgp) {
+        record_grammar_probabilities = rgp;
     }
 
     void reset_seed(int seed) {
@@ -764,8 +775,53 @@ struct Inference {
         int sidx = get_sequence_idx(name);
         if (sidx >= 0) {
             sequences[sidx].commit();
-            printf("COMMIT PROMPT:[%s]\n", this->get_sequence_text(name).c_str());
+            printf("COMMIT PROMPT:[%s]\n",
+                   this->get_sequence_text(name).c_str());
         }
+    }
+
+    void do_record_grammar_probabilities(int sample_idx) {
+        const int n_vocab = llama_n_vocab(*g_model);
+
+        float *logits = llama_get_logits_ith(*g_ctx, sample_idx);
+
+        std::vector<llama_token_data> cur;
+        for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+            cur.emplace_back(
+                llama_token_data{token_id, logits[token_id], 0.0f});
+        }
+
+        llama_token_data_array candidates_p = {cur.data(), cur.size(), false};
+
+        llama_sample_grammar(*g_ctx, &candidates_p, ctx_sampling->grammar);
+
+        // Explicitly refuse the " " token.
+        for (size_t i = 0; i < candidates_p.size; ++i) {
+            const llama_token id = candidates_p.data[i].id;
+            const std::string piece = llama_token_to_piece(*g_ctx, id);
+            if (piece == " ") {
+                candidates_p.data[i].logit = -INFINITY;
+            }
+        }
+
+        llama_sample_softmax(nullptr, &candidates_p);
+
+        json tokens;
+
+        for (size_t i = 0; i < candidates_p.size; ++i) {
+            if (candidates_p.data[i].p > 0.00001) {
+                std::string tok = tokens_to_output_formatted_string(
+                    *g_ctx, candidates_p.data[i].id);
+                json j_tok;
+                j_tok[0] = tok;
+                j_tok[1] = candidates_p.data[i].p;
+                tokens.push_back(j_tok);
+            }
+        }
+
+        // if (tokens.size() > 1) {
+        //     j_tok_resps.push_back(make_token_respose(prc, tokens));
+        // }
     }
 
     bool complete(const std::string &name,
@@ -788,7 +844,7 @@ struct Inference {
             // tokens[i]);
             llama_batch_add(batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
             seq->add_token(tokens[i]);
-            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], true);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], false);
             //            printf("accept %d\n", tokens[i]);
         }
 
@@ -817,6 +873,9 @@ struct Inference {
 
         int gen_count = 0;
         while (n_remain > 0) {
+            if (record_grammar_probabilities) {
+                do_record_grammar_probabilities(sample_idx);
+            }
             llama_token tok = llama_sampling_sample(
                 ctx_sampling, *g_ctx, nullptr, sample_idx);
 
@@ -873,7 +932,7 @@ struct Inference {
             bool is_last = (i + 1 == tokens.size());
             llama_batch_add(batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
             seq->add_token(tokens[i]);
-            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], true);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], false);
         }
 
         int sample_idx = tokens.size() - 1;
@@ -1019,7 +1078,7 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
-        seq->remove_n_tokens_after_base((size_t) delete_token_count);
+        seq->remove_n_tokens_after_base((size_t)delete_token_count);
 
         return true;
     }
@@ -1066,20 +1125,29 @@ struct Inference {
 
     int get_last_append_token_count() { return last_append_token_count; }
 
-    void reset_sampler(const std::string &name) {
+    void reset_sampler(const std::string &name,
+                       const std::string &new_grammar) {
         int sidx = get_sequence_idx(name);
         if (sidx < 0) {
             return;
         }
-        llama_sampling_reset(ctx_sampling);
+
+        if (new_grammar != sparams.grammar) {
+            llama_sampling_free(ctx_sampling);
+            sparams.grammar = new_grammar;
+            ctx_sampling = llama_sampling_init(sparams);
+
+        } else {
+            llama_sampling_reset(ctx_sampling);
+        }
 
         std::string prev_name = sequences[sidx].prev_name;
         if (prev_name.size() > 0) {
-            reset_sampler(prev_name);
+            reset_sampler(prev_name, new_grammar);
         }
 
         for (auto tok : sequences[sidx].tokens) {
-            llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
+            llama_sampling_accept(ctx_sampling, *g_ctx, tok, false);
             //            printf("accept[%s] %d\n", name.c_str(), tok);
         }
     }
@@ -1110,8 +1178,11 @@ struct Character {
     std::string name;
     std::string prompt;
     std::string log_fmt;
+    std::string log_first_fmt;
     std::string next_fmt;
     std::string first_message;
+    std::vector<std::string> scripted_responses;
+    std::vector<std::string> scripted_grammar;
     int n_gen_tokens;
 
     Character() : n_gen_tokens(0) {}
@@ -1144,9 +1215,52 @@ struct Character {
 
         prompt = replacer.apply_replacements(def.value("prompt", ""));
         log_fmt = def.value("log_fmt", "<BOT>: <RESPONSE>\n");
+        log_first_fmt = def.value("log_first_fmt", log_fmt);
         next_fmt = replacer.apply_replacements(def.value("next_fmt", "<BOT>:"));
         first_message = replacer.apply_replacements(def.value("first_mes", ""));
         n_gen_tokens = def.value("n_gen", n_predict_default);
+
+        if (def.find("script") != def.end()) {
+            for (const auto &script_resp : def["script"]) {
+                std::string resp = script_resp;
+                scripted_responses.push_back(resp);
+            }
+        }
+        if (def.find("script_grammar") != def.end()) {
+            for (const auto &script_grammar : def["script_grammar"]) {
+                std::string resp = script_grammar;
+                scripted_grammar.push_back(resp);
+            }
+        }
+    }
+
+    std::string get_scripted_response(int index,
+                                      bool &wants_completion,
+                                      std::string &grammar) {
+        size_t i = (size_t)index;
+        if (i >= scripted_grammar.size()) {
+            grammar = "";
+        } else {
+            grammar = scripted_grammar[i];
+        }
+
+        if (i >= scripted_responses.size()) {
+            wants_completion = false;
+            return "";
+        }
+
+        std::string resp = scripted_responses[i];
+        if (resp.size() > 0 && resp[resp.size() - 1] == '@') {
+            wants_completion = true;
+            return std::string(resp.data(), resp.size() - 1);
+        } else {
+            return resp;
+        }
+    }
+
+    std::string format_first(const std::string &response) {
+        replacer.add_extra("<RESPONSE>", response);
+        return replacer.apply_replacements(log_first_fmt);
     }
 
     std::string format_for_log(const std::string &response) {
@@ -1670,6 +1784,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     Conversation conversation(replacer, stop_seq, prompt_test);
     conversation.load_config(prompt_test["chat"], params.n_predict);
 
+    // TODO: Set set_record_grammar_probabilities() here!
+
     if (!infer.add_start("char", conversation.char_prompt())) {
         fprintf(stderr, "Couldn't add_start char prompt\n");
         fflush(stderr);
@@ -1756,9 +1872,12 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
         //        infer.get_sequence_text(sequence_name).c_str());
         fflush(stdout);
 
+        // TODO: Fetch grammar here!
         infer.reset_seed(prun_ctx.seed + i + reroll);
-        infer.reset_sampler(sequence_name);
+        infer.reset_sampler(sequence_name, "TODO");
 
+        // TODO: Replace the following completion and prompt preparation if
+        //       there is a scripted response!
         std::string completion_start =
             conversation.next_completion_fmt(is_user);
         int completion_token_cnt =
@@ -1811,7 +1930,8 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
             printf("REROLL\n");
             rerolled_broken_quotes++;
             reroll++;
-            conversation.append_reroll(i, reroll, "unbalanced_action_quote", raw);
+            conversation.append_reroll(
+                i, reroll, "unbalanced_action_quote", raw);
             continue;
         }
 
@@ -2100,7 +2220,8 @@ int main(int argc, char **argv) {
                 }
             }
             if (!any_matched) {
-                printf("Skipped unselected test: %s\n", prun_ctx.test_id.c_str());
+                printf("Skipped unselected test: %s\n",
+                       prun_ctx.test_id.c_str());
                 fflush(stdout);
                 continue;
             }
