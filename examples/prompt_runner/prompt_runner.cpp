@@ -51,6 +51,13 @@ static size_t benchmark_start_time;
 
 const char *ws = "\n\r";
 
+void print_kv_cache(const std::string &debug_tok);
+void print_kv_cache(const std::string &debug_tok) {
+    printf("##### KV CACHE [%s] #####\n", debug_tok.c_str());
+    llama_kv_cache_debug_print(*g_ctx);
+    printf("#########################\n");
+}
+
 std::string concatl(const std::vector<std::string> &l, bool indent = false);
 
 std::string concatl(const std::vector<std::string> &l, bool indent) {
@@ -196,10 +203,8 @@ struct PromptRunContext {
     std::string test_id;
     json expected;
     int64_t seed;
-    size_t prompt_token_cnt;
 
-    PromptRunContext()
-        : cur_test_nr(0), total_tests(0), seed(0), prompt_token_cnt(0) {}
+    PromptRunContext() : cur_test_nr(0), total_tests(0), seed(0) {}
 };
 
 json make_token_respose(PromptRunContext &prc, json tokens);
@@ -221,9 +226,7 @@ json make_token_respose(PromptRunContext &prc, json tokens) {
 
     std::string info_str = "[" + std::to_string(prc.cur_test_nr) + "/" +
                            std::to_string(prc.total_tests) +
-                           "| id=" + prc.test_id +
-                           " #p=" + std::to_string((int)prc.prompt_token_cnt) +
-                           " #e=" + expected_s + "]: ";
+                           "| id=" + prc.test_id + " #e=" + expected_s + "]: ";
 
     for (const auto &tok : tokens) {
         char buf[128];
@@ -243,8 +246,9 @@ json make_token_respose(PromptRunContext &prc, json tokens) {
     json single_response;
     single_response["test_id"] = prc.test_id;
     single_response["tokens"] = tokens;
-    single_response["expected"] = prc.expected;
-    single_response["prompt_token_count"] = (int)prc.prompt_token_cnt;
+    if (!prc.expected.is_null()) {
+        single_response["expected"] = prc.expected;
+    }
     single_response["timestamp"] = (int)time(NULL);
     single_response["time"] = now_timestr();
 
@@ -278,7 +282,6 @@ json make_response(PromptRunContext &prc,
         "[" + std::to_string(prc.cur_test_nr) + "/" +
         std::to_string(prc.total_tests) + "| id=" + prc.test_id +
         ", seed=" + std::to_string(prc.seed) +
-        ", #p=" + std::to_string((int)prc.prompt_token_cnt) +
         ", #g=" + std::to_string(gen_tok_cnt) + ", #e=" + expected_s + "]:";
 
     std::string print_gen = gen;
@@ -300,8 +303,7 @@ json make_response(PromptRunContext &prc,
     single_response["response"] = gen;
     single_response["expected"] = prc.expected;
     single_response["prompt"] = prompt;
-    single_response["prompt_token_count"] = (int)prc.prompt_token_cnt;
-    single_response["generated_token_count"] = gen_tok_cnt;
+    single_response["prompt_token_count"] = gen_tok_cnt;
     single_response["timestamp"] = (int)time(NULL);
     single_response["time"] = now_timestr();
 
@@ -547,8 +549,8 @@ std::string probs_to_string(
     for (auto p : probs) {
         char buf[20];
         size_t len = snprintf(buf, 20, "%9.7f", p.second);
-        std::string sample = std::string(buf, len) + ";" + p.first;
-        res += sample + "\x03";
+        res += std::to_string(p.first.size()) + ":" + p.first + " " +
+               std::string(buf, len) + ";";
     }
     return res;
 }
@@ -556,6 +558,7 @@ std::string probs_to_string(
 struct Completion {
     bool error;
     std::vector<std::pair<std::string, float>> tok_probabilities;
+    std::vector<std::string> min_p_tokens;
     int prompt_token_count;
     std::string raw;
     std::string completion;
@@ -574,13 +577,21 @@ struct CompletionNode {
     bool cleanup_quotes;
     StopSequences stop_seq;
     int64_t seed;
+    float record_min_p_tokens;
 
     std::vector<std::pair<std::string, float>> result_probs;
     std::string result_string;
     int prompt_token_count;
+    json result_sampler;
+    json result_min_p_tokens;
 
     CompletionNode()
-        : index(0), gen_count(0), cleanup_quotes(false), seed(-1), prompt_token_count(0) {}
+        : index(0),
+          gen_count(0),
+          cleanup_quotes(false),
+          seed(-1),
+          record_min_p_tokens(0.0),
+          prompt_token_count(0) {}
 
     void from_json(const json &node) {
         if (node.find("sampler") != node.end()) {
@@ -595,6 +606,7 @@ struct CompletionNode {
         gen_count = node.value("n_gen", 0);
         seed = node.value("seed", -1);
         cleanup_quotes = node.value("cleanup_quotes", false);
+        record_min_p_tokens = node.value("record_min_p_tokens", 0.0);
         if (node.find("payload") != node.end()) {
             payload = node["payload"];
         }
@@ -605,7 +617,16 @@ struct CompletionNode {
         res["text"] = result_string;
         res["prompt_token_count"] = prompt_token_count;
         res["probs"] = probs_to_string(result_probs);
-        res["payload"] = payload;
+        if (!payload.is_null()) {
+            res["payload"] = payload;
+        }
+        if (!result_min_p_tokens.is_null()) {
+            json min_p;
+            min_p["min_p"] = record_min_p_tokens;
+            min_p["res"] = result_min_p_tokens;
+            res["min_p_tokens"] = min_p;
+        }
+        // res["sampler"] = result_sampler;
         return res;
     }
 };
@@ -626,6 +647,7 @@ struct Inference {
         int recent_add_tokens;
         int base_tokens;
         bool base_committed;
+        bool no_bos;
 
         Sequence()
             : p0(0),
@@ -633,7 +655,8 @@ struct Inference {
               seq_id(0),
               recent_add_tokens(0),
               base_tokens(0),
-              base_committed(false) {}
+              base_committed(false),
+              no_bos(false) {}
 
         void commit() { recent_add_tokens = 0; }
 
@@ -743,13 +766,19 @@ struct Inference {
     int n_batch;
     std::vector<Sequence> sequences;
     std::vector<std::pair<std::string, float>> tok_probs;
+    std::vector<std::string> min_p_tok_probs;
+    float record_min_p_tokens;
     llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
 
     int last_append_token_count;
 
     Inference(llama_sampling_params &sp, int nb)
-        : cur_seq_id(0), n_batch(nb), sparams(sp), last_append_token_count(0) {
+        : cur_seq_id(0),
+          n_batch(nb),
+          record_min_p_tokens(0.0),
+          sparams(sp),
+          last_append_token_count(0) {
         llama_kv_cache_clear(*g_ctx);
         ctx_sampling = llama_sampling_init(sp);
     }
@@ -780,19 +809,34 @@ struct Inference {
         return max;
     }
 
-    bool load_tokens(bool is_bos,
+    std::vector<llama_token> tokenize(const std::string &name,
+                                      const std::string &text) {
+        bool is_bos = name == "";
+        bool add_bos = name == "";
+        if (name.size() > 0) {
+            Sequence *seq = get_sequence(name);
+            is_bos = (!seq->no_bos) && seq->p1 == 0;
+            add_bos = (seq->p1 == 0) &&
+                      (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
+        }
+
+        // printf("TOKENIZE add_bos=%d, is_bos=%d [%s]\n",
+        //        add_bos,
+        //        is_bos,
+        //        text.c_str());
+        std::vector<llama_token> tokens;
+        tokens = ::llama_tokenize(*g_ctx, text.c_str(), add_bos, true, !is_bos);
+        return tokens;
+    }
+
+    bool load_tokens(const std::string &name,
                      const std::string &text,
                      int seq_id,
                      int p0,
                      std::vector<llama_token> &out_tokens,
                      int &p1) {
         if (text.size() == 0) return true;
-
-        const bool add_bos =
-            is_bos && (llama_vocab_type(*g_model) == LLAMA_VOCAB_TYPE_SPM);
-        std::vector<llama_token> tokens;
-        tokens =
-            ::llama_tokenize(*g_ctx, text.c_str(), add_bos, false, !is_bos);
+        auto tokens = tokenize(name, text);
 
         for (int i = 0; i < (int)tokens.size(); i += n_batch) {
             int n_eval = (int)tokens.size() - i;
@@ -803,6 +847,12 @@ struct Inference {
             auto batch = llama_batch_init(tokens.size(), 0, 1);
             for (int j = 0; j < n_eval; j++) {
                 int tok_idx = j + i;
+                // const std::string piece =
+                //     llama_token_to_piece(*g_ctx, tokens[tok_idx]);
+                // printf("LDDBATCH %d = %d [%s]\n",
+                //        p0 + tok_idx,
+                //        tokens[tok_idx],
+                //        piece.c_str());
                 llama_batch_add(
                     batch, tokens[tok_idx], p0 + tok_idx, {seq_id}, false);
                 out_tokens.push_back(tokens[tok_idx]);
@@ -821,27 +871,6 @@ struct Inference {
         return true;
     }
 
-    bool add_start(const std::string &name, const std::string &text) {
-        std::vector<llama_token> tokens;
-        int p1 = 0;
-        int seq_id = cur_seq_id++;
-
-        bool ok = load_tokens(true, text, seq_id, 0, tokens, p1);
-        if (ok) {
-            Sequence seq;
-            seq.seq_id = seq_id;
-            seq.name = name;
-
-            for (auto tok : tokens) {
-                seq.add_token(tok);
-            }
-
-            sequences.push_back(seq);
-        }
-
-        return ok;
-    }
-
     int get_sequence_idx(const std::string &name) {
         for (size_t i = 0; i < sequences.size(); i++) {
             if (sequences[i].name == name) {
@@ -850,6 +879,20 @@ struct Inference {
         }
 
         return -1;
+    }
+
+    Sequence *get_sequence(const std::string &name) {
+        int sidx = get_sequence_idx(name);
+        Sequence *s = nullptr;
+        if (sidx >= 0) {
+            s = &sequences[sidx];
+        } else {
+            sequences.push_back(Sequence());
+            s = &sequences[sequences.size() - 1];
+            s->seq_id = cur_seq_id++;
+            s->name = name;
+        }
+        return s;
     }
 
     void commit_base(const std::string &name) {
@@ -863,8 +906,8 @@ struct Inference {
         int sidx = get_sequence_idx(name);
         if (sidx >= 0) {
             sequences[sidx].commit();
-            printf("COMMIT PROMPT:[%s]\n",
-                   this->get_sequence_text(name).c_str());
+            // printf("COMMIT PROMPT:[%s]\n",
+            //        this->get_sequence_text(name).c_str());
         }
     }
 
@@ -913,7 +956,8 @@ struct Inference {
             llama_token tok = candidates_p.data[i].id;
 
             const std::string piece = llama_token_to_piece(*g_ctx, tok);
-            toks.push_back(std::pair<std::string, float>(piece, candidates_p.data[i].p));
+            toks.push_back(
+                std::pair<std::string, float>(piece, candidates_p.data[i].p));
         }
 
         return toks;
@@ -923,26 +967,33 @@ struct Inference {
         return tok_probs;
     }
 
+    std::vector<std::string> get_recent_min_p_tok_probs() {
+        return min_p_tok_probs;
+    }
+
     bool complete(const std::string &name,
                   const std::string &text,
                   int n_remain,
                   std::function<bool(int, const std::string &)> check_for_end) {
         tok_probs.clear();
+        min_p_tok_probs.clear();
+        Sequence *seq = get_sequence(name);
+        // print_kv_cache("complete start");
+        // printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
+        //        seq->seq_id,
+        //        seq->p0,
+        //        seq->p1);
 
-        int sidx = get_sequence_idx(name);
-        if (sidx < 0) {
-            return false;
-        }
-        Sequence *seq = &sequences[sidx];
-        //        printf("complete sequence: seq_id=%d p0=%d, p1=%d\n",
-        //        seq->seq_id, seq->p0, seq->p1);
-
-        auto tokens = ::llama_tokenize(*g_ctx, text.c_str(), false, true, true);
+        auto tokens = tokenize(name, text);
         auto batch = llama_batch_init(tokens.size(), 0, 1);
         for (size_t i = 0; i < tokens.size(); i++) {
             bool is_last = (i + 1 == tokens.size());
-            // d// printf("ADDBATCH %d (is_last=%d) = %d\n", seq->p1, is_last,
-            // tokens[i]);
+            // const std::string piece = llama_token_to_piece(*g_ctx,
+            // tokens[i]); printf("ADDBATCH %d (is_last=%d) = %d [%s]\n",
+            //        seq->p1,
+            //        is_last,
+            //        tokens[i],
+            //        piece.c_str());
             llama_batch_add(batch, tokens[i], seq->p1, {seq->seq_id}, is_last);
             seq->add_token(tokens[i]);
             llama_sampling_accept(ctx_sampling, *g_ctx, tokens[i], false);
@@ -984,10 +1035,10 @@ struct Inference {
 
             // TODO: FIX the bug with the completion in first step!
 
-            auto min_p_toks = get_min_p_tokens(sample_idx, 0.01, 1);
-            for (auto t : min_p_toks) {
-                // TODO: REcord these minp probabilities!
-                //d// printf("MINP: %10s = %9.7f\n", t.first.c_str(), t.second);
+            if (record_min_p_tokens > 0.00001) {
+                auto min_p_toks =
+                    get_min_p_tokens(sample_idx, record_min_p_tokens, 1);
+                min_p_tok_probs.push_back(probs_to_string(min_p_toks));
             }
 
             tok_probs.push_back(std::pair<std::string, float>(piece, tok_p));
@@ -1002,8 +1053,7 @@ struct Inference {
             seq->add_token(tok);
 
             std::string seq_str = seq->recent_string();
-            // d// printf("SEQ %d %s\n", seq->recent_add_tokens,
-            // seq_str.c_str());
+            // printf("SEQ %d %s\n", seq->recent_add_tokens, seq_str.c_str());
             if (check_for_end(gen_count, seq_str)) {
                 n_remain = 0;
             } else {
@@ -1012,12 +1062,20 @@ struct Inference {
 
             auto one_batch = llama_batch_init(tokens.size(), 0, 1);
 
+            // const std::string piece_add = llama_token_to_piece(*g_ctx, tok);
+            // printf("ADDBATCH %d (is_last=yes) = %d [%s]\n", seq->p1 - 1,
+            // tok, piece_add.c_str());
             llama_batch_add(one_batch, tok, seq->p1 - 1, {seq->seq_id}, true);
             if (llama_decode(*g_ctx, one_batch)) {
                 fprintf(stderr, "%s : failed to eval\n", __func__);
                 llama_batch_free(one_batch);
                 return false;
             }
+
+            // print_kv_cache(
+            //     "complete step sample_idx=" + std::to_string(sample_idx) +
+            //     "; token=[" + piece + "]");
+
             sample_idx = 0;
             llama_batch_free(one_batch);
         }
@@ -1049,6 +1107,7 @@ struct Inference {
 
         Completion c;
         c.tok_probabilities = get_recent_tok_prob_sequence();
+        c.min_p_tokens = get_recent_min_p_tok_probs();
         c.prompt_token_count = get_sequence_token_count(sequence_name);
         c.raw = get_recently_added_tokens_str(sequence_name);
         c.completion = c.raw.substr(prefix.size());
@@ -1073,8 +1132,15 @@ struct Inference {
                 reset_seed(node.seed);
             }
 
+            if (node.record_min_p_tokens > 0.0001) {
+                record_min_p_tokens = node.record_min_p_tokens;
+            }
+
             c = complete_and_rewind(
                 sequence_name, node.prefix, node.gen_count, node.stop_seq);
+
+            record_min_p_tokens = 0.0;
+
             if (c.error) {
                 return c;
             }
@@ -1088,8 +1154,10 @@ struct Inference {
             node.result_string = append_text;
             node.prompt_token_count = c.prompt_token_count;
             node.result_probs = c.tok_probabilities;
+            node.result_sampler = sparams_to_json(test_sparams);
+            node.result_min_p_tokens = c.min_p_tokens;
 
-            if (!append(sequence_name, append_text)) {
+            if (!append(sequence_name, append_text, true)) {
                 c.set_inference_error();
                 return c;
             }
@@ -1177,11 +1245,11 @@ struct Inference {
         }
         Sequence *seq = &sequences[sidx];
 
-        // llama_kv_cache_debug_print(*g_ctx, "bef_rewind");
+        // print_kv_cache("PRE REWIND");
         if (seq->recent_add_tokens > 0) {
             seq->rewind();
         }
-        // llama_kv_cache_debug_print(*g_ctx, "aft_rewind");
+        // print_kv_cache("POST REWIND");
 
         return true;
     }
@@ -1212,29 +1280,23 @@ struct Inference {
         return true;
     }
 
-    bool append(const std::string &name, const std::string &text) {
-        int sidx = get_sequence_idx(name);
-        Sequence *s = nullptr;
-        if (sidx >= 0) {
-            s = &sequences[sidx];
-        } else {
-            sequences.push_back(Sequence());
-            s = &sequences[sequences.size() - 1];
-            s->seq_id = cur_seq_id++;
-        }
-
+    bool append(const std::string &name,
+                const std::string &text,
+                bool no_bos = false) {
+        Sequence *s = get_sequence(name);
+        s->no_bos = no_bos;
         // d// printf("SEQUENCE [%s] seq_id=%d\n", name.c_str(), s->seq_id);
-
-        s->name = name;
 
         std::vector<llama_token> tokens;
         int new_p1 = 0;
-        bool ok = load_tokens(false, text, s->seq_id, s->p1, tokens, new_p1);
+        bool ok = load_tokens(name, text, s->seq_id, s->p1, tokens, new_p1);
         last_append_token_count = 0;
         for (auto tok : tokens) {
             s->add_token(tok);
             last_append_token_count++;
         }
+
+        // print_kv_cache("append end");
         return ok;
     }
 
@@ -1931,13 +1993,13 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     Conversation conversation(replacer, stop_seq, prompt_test);
     conversation.load_config(prompt_test["chat"], params.n_predict);
 
-    if (!infer.add_start("char", conversation.char_prompt())) {
-        fprintf(stderr, "Couldn't add_start char prompt\n");
+    if (!infer.append("char", conversation.char_prompt())) {
+        fprintf(stderr, "Couldn't init append char prompt\n");
         fflush(stderr);
         return false;
     }
-    if (!infer.add_start("user", conversation.user_prompt())) {
-        fprintf(stderr, "Couldn't add_start user prompt\n");
+    if (!infer.append("user", conversation.user_prompt())) {
+        fprintf(stderr, "Couldn't init append user prompt\n");
         fflush(stderr);
         return false;
     }
@@ -2293,11 +2355,6 @@ int main(int argc, char **argv) {
                 llama_print_system_info());
     }
 
-    // Add BOS if SPM tokenizer
-    const bool add_bos = llama_vocab_type(model) == LLAMA_VOCAB_TYPE_SPM;
-
-    // tokenize the prompt
-    std::vector<llama_token> embd_inp;
     json j_resps;
     json j_tok_resps;
 
@@ -2341,6 +2398,12 @@ int main(int argc, char **argv) {
 
         prun_ctx.test_id = prompt_test.value("id", "unknown_test_id");
 
+        bool disabled = prompt_test.value("disabled", false);
+        if (disabled) {
+            printf("Disabled test: %s\n", prun_ctx.test_id.c_str());
+            continue;
+        }
+
         if (selected_tests.size() > 0) {
             bool any_matched = false;
             for (const auto &sel_id : selected_tests) {
@@ -2357,17 +2420,6 @@ int main(int argc, char **argv) {
             }
         }
 
-        std::string prompt =
-            replacer.apply_replacements(prompt_test, "<PROMPT>");
-        rtrim_nl(prompt);
-
-        if (g_verbose) {
-            printf(
-                "PROMPT------------------------\n%s\n--------------------------"
-                "---\n",
-                prompt.c_str());
-        }
-
         fflush(stdout);
 
         auto seeds =
@@ -2381,22 +2433,6 @@ int main(int argc, char **argv) {
 
             if (params.prompt.empty()) {
                 fprintf(stderr, "No prompt given!");
-                return 1;
-            }
-
-            embd_inp = ::llama_tokenize(ctx, prompt.c_str(), add_bos, true);
-
-            const int n_ctx = llama_n_ctx(ctx);
-            prun_ctx.prompt_token_cnt = embd_inp.size();
-
-            if (((int)embd_inp.size() + (int)params.n_predict) > n_ctx - 4) {
-                fprintf(stderr,
-                        "%s: error: prompt is too long (%d tokens, %d "
-                        "predict, max %d)\n",
-                        __func__,
-                        (int)embd_inp.size(),
-                        (int)params.n_predict,
-                        n_ctx - 4);
                 return 1;
             }
 
@@ -2431,6 +2467,8 @@ int main(int argc, char **argv) {
                 CompletionScript cscript;
                 cscript.from_json(prompt_test["script"]);
 
+                json node_results;
+
                 for (auto &node : cscript.nodes) {
                     infer.reset_seed(prun_ctx.seed + node.index);
 
@@ -2442,7 +2480,27 @@ int main(int argc, char **argv) {
                     std::string res = node.result_to_json().dump(
                         2, ' ', false, json::error_handler_t::replace);
                     printf("RES: %s\n", res.c_str());
+                    node_results.push_back(node.result_to_json());
                 }
+
+                //                json prompt_collection;
+                // prompt_collection["sampler"] = sparams_to_json(sparams);
+                // prompt_collection["char"] = infer.get_sequence_text("user");
+                // prompt_collection["user"] = infer.get_sequence_text("char");
+                // prompt_collection["chatlog"] =
+                // conversation.chatlog_as_json(); prompt_collection["rerolls"]
+                // = conversation.rerolls_as_json();
+                // prompt_collection["raw_chatlog"] =
+                // conversation.raw_chatlog_as_json();
+                // prompt_collection["text_chatlog"] =
+                // conversation.text_chatlog_as_json();
+                //                prompt_collection["nodes"] = node_results;
+
+                j_resps.push_back(
+                    make_response(prun_ctx,
+                                  infer.get_sequence_text("main"),
+                                  infer.current_max_seq_token_count(),
+                                  node_results));
 
                 // TODO: Append to j_resps
             }
