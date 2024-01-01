@@ -602,12 +602,15 @@ struct Completion {
 };
 
 struct CompletionNode {
+    std::string name;
     int index;
     std::string prefix;
     json sampler_settings;
     json payload;
     int gen_count;
-    bool cleanup_quotes;
+    std::string cleanup_quotes;
+    std::string cleanup_regex;
+    std::string cleanup_regex_repl;
     StopSequences stop_seq;
     int64_t seed;
     float record_min_p_tokens;
@@ -622,12 +625,17 @@ struct CompletionNode {
     CompletionNode()
         : index(0),
           gen_count(0),
-          cleanup_quotes(false),
           seed(-1),
           record_min_p_tokens(0.0),
           prompt_token_count(0) {}
 
     void from_json(const json &node) {
+        name = node.value("name", "");
+
+        if (node.find("inherit") != node.end()) {
+            // TODO: Make this node inherit all settings from some other node.
+        }
+
         if (node.find("sampler") != node.end()) {
             sampler_settings = node["sampler"];
         }
@@ -639,7 +647,14 @@ struct CompletionNode {
         prefix = node.value("prefix", "");
         gen_count = node.value("n_gen", 0);
         seed = node.value("seed", -1);
-        cleanup_quotes = node.value("cleanup_quotes", false);
+        if (node.find("cleanup") != node.end()) {
+            json cleanup = node["cleanup"];
+            cleanup_quotes = cleanup.value("quotes", "");
+            if (cleanup.find("regex") != cleanup.end() && cleanup["regex"].size() > 1) {
+                cleanup_regex = cleanup["regex"][0];
+                cleanup_regex_repl = cleanup["regex"][1];
+            }
+        }
         record_min_p_tokens = node.value("record_min_p_tokens", 0.0);
         if (node.find("payload") != node.end()) {
             payload = node["payload"];
@@ -1197,8 +1212,18 @@ struct Inference {
 
             std::string append_text = c.raw;
 
-            if (node.cleanup_quotes) {
-                // TODO
+            if (node.cleanup_quotes.size() > 0) {
+                for (size_t i = 0; i < node.cleanup_quotes.size(); i++) {
+                    int fixed_quote_len = -1;
+                    append_text = cleanup_unbalanced(
+                        append_text, node.cleanup_quotes[i], fixed_quote_len);
+                }
+            }
+
+            if (node.cleanup_regex.size() > 0) {
+                append_text = std::regex_replace(append_text,
+                                                 std::regex(node.cleanup_regex),
+                                                 node.cleanup_regex_repl);
             }
 
             node.result_string = append_text;
@@ -1376,10 +1401,10 @@ struct Inference {
 struct CompletionScript {
     std::vector<CompletionNode> nodes;
 
-    void from_json(const json &script) {
-        if (script.find("nodes") != script.end()) {
+    void from_json(const json &prompt_test) {
+        if (prompt_test.find("script") != prompt_test.end()) {
             int index = 0;
-            for (auto node : script["nodes"]) {
+            for (auto node : prompt_test["script"]) {
                 CompletionNode cn;
                 cn.index = index;
                 cn.from_json(node);
@@ -2330,8 +2355,7 @@ int main(int argc, char **argv) {
 
     if (prompt_runner_conf.find("prompt_tests") == prompt_runner_conf.end()) {
         fprintf(stderr, "**********\n");
-        fprintf(stderr,
-                "ERROR: No prompt_tests in prompt json!\n");
+        fprintf(stderr, "ERROR: No prompt_tests in prompt json!\n");
         fprintf(stderr, "**********\n");
 
         return 1;
@@ -2430,9 +2454,7 @@ int main(int argc, char **argv) {
     prun_ctx.total_tests = get_total_test_count(prompt_runner_conf);
 
     if (prun_ctx.total_tests == 0) {
-        fprintf(
-            stderr,
-            "No \"prompt_tests\" defined in the prompt json!\n");
+        fprintf(stderr, "No \"prompt_tests\" defined in the prompt json!\n");
         return 1;
     }
 
@@ -2524,7 +2546,7 @@ int main(int argc, char **argv) {
                 Inference infer(test_sparams, params.n_batch);
 
                 CompletionScript cscript;
-                cscript.from_json(prompt_test["script"]);
+                cscript.from_json(prompt_test);
 
                 json node_results;
 
