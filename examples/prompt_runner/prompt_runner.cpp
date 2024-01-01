@@ -520,6 +520,39 @@ struct TextReplacer {
     }
 };
 
+struct SampleParamSource {
+    llama_sampling_params default_sparams;
+    json sampler_lib;
+
+    SampleParamSource(const llama_sampling_params &sparams)
+        : default_sparams(sparams) {}
+    void set_sampler_lib(json slib) { sampler_lib = slib; }
+
+    bool load_sampler_settings(json in_sampler,
+                               llama_sampling_params &sparams) {
+        if (in_sampler.is_string()) {
+            std::string key = in_sampler;
+            if (sampler_lib.find(key) == sampler_lib.end()) {
+                printf("ERROR: UNKNOWN SAMPLER KEY: %s\n", key.c_str());
+                sparams = default_sparams;
+                return false;
+            }
+
+            json_to_sparams(sampler_lib[key], sparams);
+        } else if (in_sampler.is_object()) {
+            json_to_sparams(in_sampler, sparams);
+        } else if (in_sampler.is_null()) {
+            sparams = default_sparams;
+        } else {
+            std::string du = in_sampler.dump();
+            printf("ERROR: BAD SAMPLER SETTINGS: %s\n", du.c_str());
+            return false;
+        }
+
+        return true;
+    }
+};
+
 struct StopSequences {
     json stop_sequences;
 
@@ -578,6 +611,7 @@ struct CompletionNode {
     StopSequences stop_seq;
     int64_t seed;
     float record_min_p_tokens;
+    json replacements;
 
     std::vector<std::pair<std::string, float>> result_probs;
     std::string result_string;
@@ -610,6 +644,16 @@ struct CompletionNode {
         if (node.find("payload") != node.end()) {
             payload = node["payload"];
         }
+        if (node.find("replacements") != node.end()) {
+            replacements = node["replacements"];
+        }
+    }
+
+    std::string get_completion_text(TextReplacer &replacer) {
+        if (!replacements.is_null()) {
+            replacer.merge_replacements(replacements);
+        }
+        return replacer.apply_replacements(prefix);
     }
 
     json result_to_json() {
@@ -1033,8 +1077,6 @@ struct Inference {
             float tok_p = get_token_probabilitiy(tok, sample_idx);
             const std::string piece = llama_token_to_piece(*g_ctx, tok);
 
-            // TODO: FIX the bug with the completion in first step!
-
             if (record_min_p_tokens > 0.00001) {
                 auto min_p_toks =
                     get_min_p_tokens(sample_idx, record_min_p_tokens, 1);
@@ -1118,12 +1160,18 @@ struct Inference {
     }
 
     Completion complete_node(const std::string &sequence_name,
-                             CompletionNode &node) {
+                             CompletionNode &node,
+                             SampleParamSource &sampler_source,
+                             TextReplacer &replacer) {
         Completion c;
 
         if (node.gen_count > 0) {
-            llama_sampling_params test_sparams = sparams;
-            json_to_sparams(node.sampler_settings, test_sparams);
+            llama_sampling_params test_sparams;
+            if (!sampler_source.load_sampler_settings(node.sampler_settings,
+                                                      test_sparams)) {
+                c.set_inference_error();
+                return c;
+            }
 
             llama_sampling_free(ctx_sampling);
             ctx_sampling = llama_sampling_init(test_sparams);
@@ -1136,8 +1184,10 @@ struct Inference {
                 record_min_p_tokens = node.record_min_p_tokens;
             }
 
+            std::string compl_text = node.get_completion_text(replacer);
+
             c = complete_and_rewind(
-                sequence_name, node.prefix, node.gen_count, node.stop_seq);
+                sequence_name, compl_text, node.gen_count, node.stop_seq);
 
             record_min_p_tokens = 0.0;
 
@@ -2274,15 +2324,21 @@ int main(int argc, char **argv) {
         fflush(stderr);
     }
 
+    SampleParamSource sampler_source(sparams);
+
     const json prompt_runner_conf = json::parse(params.prompt);
 
     if (prompt_runner_conf.find("prompt_tests") == prompt_runner_conf.end()) {
         fprintf(stderr, "**********\n");
         fprintf(stderr,
-                "ERROR: No prompt_tests in prompt_runner_config.json!\n");
+                "ERROR: No prompt_tests in prompt json!\n");
         fprintf(stderr, "**********\n");
 
         return 1;
+    }
+
+    if (prompt_runner_conf.find("samplers") != prompt_runner_conf.end()) {
+        sampler_source.set_sampler_lib(prompt_runner_conf["samplers"]);
     }
 
     json selected_tests;
@@ -2376,7 +2432,7 @@ int main(int argc, char **argv) {
     if (prun_ctx.total_tests == 0) {
         fprintf(
             stderr,
-            "No \"prompt_tests\" defined in the prompt_runner_config.json!\n");
+            "No \"prompt_tests\" defined in the prompt json!\n");
         return 1;
     }
 
@@ -2421,6 +2477,9 @@ int main(int argc, char **argv) {
         }
 
         fflush(stdout);
+
+        TextReplacer test_replacer = replacer;
+        test_replacer.merge_replacements(prompt_test);
 
         auto seeds =
             get_seeds_for_test(params.seed, prompt_runner_conf, prompt_test);
@@ -2472,7 +2531,8 @@ int main(int argc, char **argv) {
                 for (auto &node : cscript.nodes) {
                     infer.reset_seed(prun_ctx.seed + node.index);
 
-                    auto com = infer.complete_node("main", node);
+                    auto com = infer.complete_node(
+                        "main", node, sampler_source, test_replacer);
                     if (com.error) {
                         return 1;
                     }
