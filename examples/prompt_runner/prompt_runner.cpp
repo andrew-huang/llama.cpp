@@ -1732,12 +1732,12 @@ struct Conversation {
                     l.total_token_count = user_token_count;
                 }
 
-                printf("TOK iut=%d ict=%d char=%d tc=%d tot=%d\n",
-                       init_user_prompt_tokens,
-                       init_char_prompt_tokens,
-                       l.is_char,
-                       l.token_count,
-                       l.total_token_count);
+                // printf("TOK iut=%d ict=%d char=%d tc=%d tot=%d\n",
+                //        init_user_prompt_tokens,
+                //        init_char_prompt_tokens,
+                //        l.is_char,
+                //        l.token_count,
+                //        l.total_token_count);
             }
         }
     }
