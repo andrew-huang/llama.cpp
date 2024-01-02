@@ -650,7 +650,8 @@ struct CompletionNode {
         if (node.find("cleanup") != node.end()) {
             json cleanup = node["cleanup"];
             cleanup_quotes = cleanup.value("quotes", "");
-            if (cleanup.find("regex") != cleanup.end() && cleanup["regex"].size() > 1) {
+            if (cleanup.find("regex") != cleanup.end() &&
+                cleanup["regex"].size() > 1) {
                 cleanup_regex = cleanup["regex"][0];
                 cleanup_regex_repl = cleanup["regex"][1];
             }
@@ -1717,16 +1718,26 @@ struct Conversation {
 
             int user_token_count = init_user_prompt_tokens;
             int char_token_count = init_char_prompt_tokens;
+            int total_token_count = 0;
             for (auto &l : chatlog) {
-                int total_token_count = 0;
+                total_token_count += l.token_count;
+
                 if (l.is_char) {
-                    char_token_count += l.token_count;
-                    total_token_count = char_token_count;
+                    char_token_count =
+                        init_char_prompt_tokens + total_token_count;
+                    l.total_token_count = char_token_count;
                 } else {
-                    user_token_count += l.token_count;
-                    total_token_count = user_token_count;
+                    user_token_count =
+                        init_user_prompt_tokens + total_token_count;
+                    l.total_token_count = user_token_count;
                 }
-                l.total_token_count = total_token_count;
+
+                printf("TOK iut=%d ict=%d char=%d tc=%d tot=%d\n",
+                       init_user_prompt_tokens,
+                       init_char_prompt_tokens,
+                       l.is_char,
+                       l.token_count,
+                       l.total_token_count);
             }
         }
     }
@@ -2082,6 +2093,10 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     infer.commit_base("char");
     infer.commit_base("user");
 
+    // Set the initial length of the prompts:
+    conversation.set_init_seq_lengths(infer.get_sequence_token_count("char"),
+                                      infer.get_sequence_token_count("user"));
+
     if (!infer.append("char", conversation.chatlog_text())) {
         fprintf(stderr, "Couldn't append chatlog\n");
         fflush(stderr);
@@ -2089,16 +2104,15 @@ bool chatlog_generator(PromptRunContext &prun_ctx,
     }
     infer.commit("char");
 
+    conversation.set_last_chat_response_len(
+        infer.get_last_append_token_count());
+
     if (!infer.append("user", conversation.chatlog_text())) {
         fprintf(stderr, "Couldn't append chatlog\n");
         fflush(stderr);
         return false;
     }
     infer.commit("user");
-
-    // Set the initial length of the prompts:
-    conversation.set_init_seq_lengths(infer.get_sequence_token_count("char"),
-                                      infer.get_sequence_token_count("user"));
 
     bool is_user = true;
     std::string end_reason;
