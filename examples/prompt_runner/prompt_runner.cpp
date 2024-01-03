@@ -603,8 +603,11 @@ struct Completion {
 
 struct CompletionNode {
     std::string name;
+    bool skip;
+    bool no_commit;
     int index;
     std::string prefix;
+    std::string postfix;
     json sampler_settings;
     json payload;
     int gen_count;
@@ -623,18 +626,29 @@ struct CompletionNode {
     json result_min_p_tokens;
 
     CompletionNode()
-        : index(0),
+        : skip(false),
+          no_commit(false),
+          index(0),
           gen_count(0),
           seed(-1),
           record_min_p_tokens(0.0),
           prompt_token_count(0) {}
 
-    void from_json(const json &node) {
-        name = node.value("name", "");
-
+    void from_json(
+        const json &node,
+        const std::vector<std::pair<std::string, json>> &prev_nodes) {
         if (node.find("inherit") != node.end()) {
-            // TODO: Make this node inherit all settings from some other node.
+            std::string inherit_name = node.value("inherit", "");
+            for (auto &pn : prev_nodes) {
+                if (pn.first == inherit_name) {
+                    this->from_json(pn.second, prev_nodes);
+                    break;
+                }
+            }
         }
+
+        name = node.value("name", "");
+        skip = node.value("skip", false);
 
         if (node.find("sampler") != node.end()) {
             sampler_settings = node["sampler"];
@@ -644,9 +658,26 @@ struct CompletionNode {
             stop_seq.set_stop_sequences(node["stop_sequences"]);
         }
 
-        prefix = node.value("prefix", "");
-        gen_count = node.value("n_gen", 0);
-        seed = node.value("seed", -1);
+        if (node.find("prefix") != node.end()) {
+            prefix = node.value("prefix", "");
+        }
+
+        if (node.find("postfix") != node.end()) {
+            postfix = node.value("postfix", "");
+        }
+
+        if (node.find("n_gen") != node.end()) {
+            gen_count = node.value("n_gen", 0);
+        }
+
+        if (node.find("no_commit") != node.end()) {
+            no_commit = node.value("no_commit", false);
+        }
+
+        if (node.find("seed") != node.end()) {
+            seed = node.value("seed", -1);
+        }
+
         if (node.find("cleanup") != node.end()) {
             json cleanup = node["cleanup"];
             cleanup_quotes = cleanup.value("quotes", "");
@@ -656,10 +687,15 @@ struct CompletionNode {
                 cleanup_regex_repl = cleanup["regex"][1];
             }
         }
-        record_min_p_tokens = node.value("record_min_p_tokens", 0.0);
+
+        if (node.find("record_min_p_tokens") != node.end()) {
+            record_min_p_tokens = node.value("record_min_p_tokens", 0.0);
+        }
+
         if (node.find("payload") != node.end()) {
             payload = node["payload"];
         }
+
         if (node.find("replacements") != node.end()) {
             replacements = node["replacements"];
         }
@@ -680,7 +716,7 @@ struct CompletionNode {
         if (!payload.is_null()) {
             res["payload"] = payload;
         }
-        if (!result_min_p_tokens.is_null()) {
+        if (result_min_p_tokens.size() > 0) {
             json min_p;
             min_p["min_p"] = record_min_p_tokens;
             min_p["res"] = result_min_p_tokens;
@@ -1227,28 +1263,44 @@ struct Inference {
                                                  node.cleanup_regex_repl);
             }
 
+            if (node.postfix.size() > 0) {
+                append_text = append_text + node.postfix;
+            }
+
             node.result_string = append_text;
             node.prompt_token_count = c.prompt_token_count;
             node.result_probs = c.tok_probabilities;
             node.result_sampler = sparams_to_json(test_sparams);
             node.result_min_p_tokens = c.min_p_tokens;
 
-            if (!append(sequence_name, append_text, true)) {
-                c.set_inference_error();
-                return c;
+            if (!node.no_commit) {
+                if (!append(sequence_name, append_text, true)) {
+                    c.set_inference_error();
+                    return c;
+                }
             }
 
         } else {
-            if (!append(sequence_name, node.prefix)) {
-                c.set_inference_error();
-                return c;
+            std::string append_text = node.prefix;
+
+            if (node.postfix.size() > 0) {
+                append_text = append_text + node.postfix;
+            }
+
+            if (!node.no_commit) {
+                if (!append(sequence_name, append_text)) {
+                    c.set_inference_error();
+                    return c;
+                }
             }
 
             node.result_string = get_recently_added_tokens_str(sequence_name);
             node.prompt_token_count = get_sequence_token_count(sequence_name);
         }
 
-        commit(sequence_name);
+        if (!node.no_commit) {
+            commit(sequence_name);
+        }
         return c;
     }
 
@@ -1401,14 +1453,21 @@ struct Inference {
 
 struct CompletionScript {
     std::vector<CompletionNode> nodes;
+    std::vector<std::pair<std::string, json>> node_configs;
 
     void from_json(const json &prompt_test) {
         if (prompt_test.find("script") != prompt_test.end()) {
             int index = 0;
+            for (auto &node : prompt_test["script"]) {
+                std::string name = node.value("name", "");
+                node_configs.push_back(
+                    std::pair<std::string, json>(name, node));
+            }
+
             for (auto node : prompt_test["script"]) {
                 CompletionNode cn;
                 cn.index = index;
-                cn.from_json(node);
+                cn.from_json(node, node_configs);
                 nodes.push_back(cn);
                 index += 1;
             }
@@ -2565,6 +2624,8 @@ int main(int argc, char **argv) {
                 json node_results;
 
                 for (auto &node : cscript.nodes) {
+                    if (node.skip) continue;
+
                     infer.reset_seed(prun_ctx.seed + node.index);
 
                     auto com = infer.complete_node(
