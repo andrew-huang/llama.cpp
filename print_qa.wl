@@ -23,9 +23,10 @@
     ];
 
 !category_weights = ${
-    iq4_questions = 0.5,
-    iq4_coherency_stmt_colors = 0.25,
-    iq4_coherency_topic_colors = 0.25,
+    iq4_questions = 0.4,
+    iq4_coherency_stmt_colors = 0.2,
+    iq4_coherency_topic_colors = 0.2,
+    iq4_coherency_tests = 0.2,
 };
 
 !CATEGORY_LIST = map {|| _1 } category_weights;
