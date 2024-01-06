@@ -617,9 +617,11 @@ struct CompletionNode {
     StopSequences stop_seq;
     int64_t seed;
     float record_min_p_tokens;
+    int gen_top_n_tokens;
     json replacements;
 
     std::vector<std::pair<std::string, float>> result_probs;
+    json top_token_results;
     std::string result_string;
     int prompt_token_count;
     json result_sampler;
@@ -632,6 +634,7 @@ struct CompletionNode {
           gen_count(0),
           seed(-1),
           record_min_p_tokens(0.0),
+          gen_top_n_tokens(0),
           prompt_token_count(0) {}
 
     void from_json(
@@ -674,6 +677,10 @@ struct CompletionNode {
             no_commit = node.value("no_commit", false);
         }
 
+        if (node.find("gen_top_n_tokens") != node.end()) {
+            gen_top_n_tokens = node.value("gen_top_n_tokens", 0);
+        }
+
         if (node.find("seed") != node.end()) {
             seed = node.value("seed", -1);
         }
@@ -708,6 +715,24 @@ struct CompletionNode {
         return replacer.apply_replacements(prefix);
     }
 
+    void add_top_token_result(
+        int top_token_index,
+        const std::vector<std::pair<std::string, float>> &probs,
+        const std::string &top_result_string,
+        const std::vector<std::string> &min_p_tokens) {
+        json res;
+        res["text"] = top_result_string;
+        res["probs"] = probs_to_string(probs);
+        res["index"] = top_token_index;
+        if (min_p_tokens.size() > 0) {
+            json min_p;
+            min_p["min_p"] = record_min_p_tokens;
+            min_p["res"] = min_p_tokens;
+            res["min_p_tokens"] = min_p;
+        }
+        top_token_results.push_back(res);
+    }
+
     json result_to_json() {
         json res;
         res["text"] = result_string;
@@ -715,6 +740,9 @@ struct CompletionNode {
         res["probs"] = probs_to_string(result_probs);
         if (!payload.is_null()) {
             res["payload"] = payload;
+        }
+        if (top_token_results.size() > 0) {
+            res["top_token_results"] = top_token_results;
         }
         if (result_min_p_tokens.size() > 0) {
             json min_p;
@@ -864,6 +892,7 @@ struct Inference {
     std::vector<std::pair<std::string, float>> tok_probs;
     std::vector<std::string> min_p_tok_probs;
     float record_min_p_tokens;
+    int sample_from_token_i;
     llama_sampling_params sparams;
     llama_sampling_context *ctx_sampling;
 
@@ -873,6 +902,7 @@ struct Inference {
         : cur_seq_id(0),
           n_batch(nb),
           record_min_p_tokens(0.0),
+          sample_from_token_i(1),
           sparams(sp),
           last_append_token_count(0) {
         llama_kv_cache_clear(*g_ctx);
@@ -1007,6 +1037,36 @@ struct Inference {
         }
     }
 
+    llama_token sample_top_token_i(int sample_idx, int &tok_idx) {
+        const int n_vocab = llama_n_vocab(*g_model);
+
+        float *logits = llama_get_logits_ith(*g_ctx, sample_idx);
+
+        std::vector<llama_token_data> cur;
+        for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
+            cur.emplace_back(
+                llama_token_data{token_id, logits[token_id], 0.0f});
+        }
+
+        llama_token_data_array candidates_p = {cur.data(), cur.size(), false};
+
+        if (ctx_sampling->grammar != NULL) {
+            llama_sample_grammar(*g_ctx, &candidates_p, ctx_sampling->grammar);
+        }
+
+        llama_sample_softmax(nullptr, &candidates_p);
+
+        if (candidates_p.size > 0) {
+            if (((size_t)tok_idx) >= candidates_p.size) {
+                tok_idx = candidates_p.size - 1;
+            }
+
+            return candidates_p.data[tok_idx].id;
+        } else {
+            return 0;
+        }
+    }
+
     float get_token_probabilitiy(llama_token tok, int sample_idx) {
         const int n_vocab = llama_n_vocab(*g_model);
 
@@ -1121,8 +1181,13 @@ struct Inference {
 
         int gen_count = 0;
         while (n_remain > 0) {
-            llama_token tok = llama_sampling_sample(
-                ctx_sampling, *g_ctx, nullptr, sample_idx);
+            llama_token tok = 0;
+            if (gen_count == 0 && sample_from_token_i > 0) {
+                tok = sample_top_token_i(sample_idx, sample_from_token_i);
+            } else {
+                tok = llama_sampling_sample(
+                    ctx_sampling, *g_ctx, nullptr, sample_idx);
+            }
 
             gen_count += 1;
 
@@ -1138,7 +1203,6 @@ struct Inference {
             tok_probs.push_back(std::pair<std::string, float>(piece, tok_p));
 
             llama_sampling_accept(ctx_sampling, *g_ctx, tok, true);
-            //            printf("accept %d\n", tok);
 
             if (tok == llama_token_eos(*g_model)) {
                 return true;
@@ -1217,60 +1281,82 @@ struct Inference {
                              TextReplacer &replacer) {
         Completion c;
 
+        sample_from_token_i = 1;
+
         if (node.gen_count > 0) {
-            llama_sampling_params test_sparams;
-            if (!sampler_source.load_sampler_settings(node.sampler_settings,
-                                                      test_sparams)) {
-                c.set_inference_error();
-                return c;
+            if (node.gen_top_n_tokens > 0) {
+                sample_from_token_i = node.gen_top_n_tokens;
             }
 
-            llama_sampling_free(ctx_sampling);
-            ctx_sampling = llama_sampling_init(test_sparams);
+            std::string append_text;
 
-            if (node.seed >= 0) {
-                reset_seed(node.seed);
-            }
+            while (sample_from_token_i > 0) {
+                sample_from_token_i -= 1;
 
-            if (node.record_min_p_tokens > 0.0001) {
-                record_min_p_tokens = node.record_min_p_tokens;
-            }
-
-            std::string compl_text = node.get_completion_text(replacer);
-
-            c = complete_and_rewind(
-                sequence_name, compl_text, node.gen_count, node.stop_seq);
-
-            record_min_p_tokens = 0.0;
-
-            if (c.error) {
-                return c;
-            }
-
-            std::string append_text = c.raw;
-
-            if (node.cleanup_quotes.size() > 0) {
-                for (size_t i = 0; i < node.cleanup_quotes.size(); i++) {
-                    int fixed_quote_len = -1;
-                    append_text = cleanup_unbalanced(
-                        append_text, node.cleanup_quotes[i], fixed_quote_len);
+                llama_sampling_params test_sparams;
+                if (!sampler_source.load_sampler_settings(node.sampler_settings,
+                                                          test_sparams)) {
+                    c.set_inference_error();
+                    return c;
                 }
+
+                llama_sampling_free(ctx_sampling);
+                ctx_sampling = llama_sampling_init(test_sparams);
+
+                if (node.seed >= 0) {
+                    reset_seed(node.seed);
+                }
+
+                if (node.record_min_p_tokens > 0.0001) {
+                    record_min_p_tokens = node.record_min_p_tokens;
+                }
+
+                std::string compl_text = node.get_completion_text(replacer);
+
+                c = complete_and_rewind(
+                    sequence_name, compl_text, node.gen_count, node.stop_seq);
+
+                record_min_p_tokens = 0.0;
+
+                if (c.error) {
+                    return c;
+                }
+
+                append_text = c.raw;
+
+                if (node.cleanup_quotes.size() > 0) {
+                    for (size_t i = 0; i < node.cleanup_quotes.size(); i++) {
+                        int fixed_quote_len = -1;
+                        append_text = cleanup_unbalanced(append_text,
+                                                         node.cleanup_quotes[i],
+                                                         fixed_quote_len);
+                    }
+                }
+
+                if (node.cleanup_regex.size() > 0) {
+                    append_text =
+                        std::regex_replace(append_text,
+                                           std::regex(node.cleanup_regex),
+                                           node.cleanup_regex_repl);
+                }
+
+                if (node.postfix.size() > 0) {
+                    append_text = append_text + node.postfix;
+                }
+
+                if (node.gen_top_n_tokens > 0) {
+                    node.add_top_token_result(sample_from_token_i,
+                                              c.tok_probabilities,
+                                              append_text,
+                                              c.min_p_tokens);
+                }
+
+                node.result_string = append_text;
+                node.result_sampler = sparams_to_json(test_sparams);
             }
 
-            if (node.cleanup_regex.size() > 0) {
-                append_text = std::regex_replace(append_text,
-                                                 std::regex(node.cleanup_regex),
-                                                 node.cleanup_regex_repl);
-            }
-
-            if (node.postfix.size() > 0) {
-                append_text = append_text + node.postfix;
-            }
-
-            node.result_string = append_text;
             node.prompt_token_count = c.prompt_token_count;
             node.result_probs = c.tok_probabilities;
-            node.result_sampler = sparams_to_json(test_sparams);
             node.result_min_p_tokens = c.min_p_tokens;
 
             if (!node.no_commit) {

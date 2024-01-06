@@ -1,6 +1,7 @@
 !std_opts = $[
     $["-f", :FILE, "The input JSON file, if none provided, the lastest named 'result_*.json' in the current dir is taken."],
     $["-m", "--min-p", "Prints the min-p tokens"],
+    $["--file-match", :MATCH, "substring of the filenames that are considered"],
     $["--test-id", :TEST_ID, "Selects only the results with this test ID (you can give an index, to select the first, second, ... test-id)"],
     $["--seed", "-s", :SEED, "Selects only the results with this seed ID (you can give an index below 99, to select the (i-1)th seed)"],
     $["--category", "-c", :CATEGORY, "Selects only the nodes with this category (you can give an index, to select the (i-1)th category)"],
@@ -14,6 +15,8 @@
     :stat => $[*std_opts]
     :raw_print => $[*std_opts]
     :print => $[*std_opts]
+    :print_full => $[*std_opts]
+    :rank => $[*std_opts]
     :list => $[
         $["-t", :TOP_N, $o(1)],
         $["-f", :FILE, "The input JSON file, if none provided, the lastest named 'result_*.json' in the current dir is taken."],
@@ -35,7 +38,13 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     !files = $[];
     std:fs:read_dir "." {
         if _.name &> $r/$^result_*\.json$$/ {
-            files +> _.mtime => _.path;
+            if is_some[cfg.file-match] {
+                if is_some[0 => cfg.file-match _.path] {
+                    files +> _.mtime => _.path;
+                };
+            } {
+                files +> _.mtime => _.path;
+            };
         };
         $f
     };
@@ -105,11 +114,12 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     text
 };
 
-!stat_prompts = {|1<3| !(prompts, categories, print) = @;
+!stat_prompts = {|1<4| !(prompts, categories, print, print_full) = @;
     is_none[categories] { .categories = ${} };
 
     !last = $n;
     iter p prompts {
+#        std:displayln ~ std:ser:json p;
         if is_some[cfg.category] {
             if cfg.category &> $r/$^$+[0-9]$$/ {
                 if is_none[p.payload] &or p.payload.category != CATEGORY_LIST.(int cfg.category) {
@@ -131,15 +141,20 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             };
         };
 
+        if print_full {
+            std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
+        } {
+            if print {
+                std:displayln ~ wrap_text_char std:str:trim[last.text] 70;
+                std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
+            };
+        };
+
         if not[p.payload] {
             .last = p;
             next[];
         };
 
-        if print {
-            std:displayln ~ wrap_text_char std:str:trim[last.text] 70;
-            std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
-        };
         .last = p;
 
         !probs = parse_probs p.probs;
@@ -153,10 +168,9 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             std:displayln ~ std:ser:json p.min_p_tokens.res;
         };
 
-        .word = std:str:to_lowercase word;
         !expected = std:str:to_lowercase p.payload.expected;
 
-        !judgement = if word != expected {
+        !judgement = if std:str:to_lowercase[word] != expected {
             categories.(p.payload.category).1 += 1;
             "FAIL";
         } {
@@ -174,19 +188,41 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
         if print {
             std:displayln "^^^^" ($F"{:4} expected: {}, got: {} @ {:9.7} | context={:4}" judgement p.payload.expected word prob p.prompt_token_count);
         };
+
+        if is_some[p.top_token_results] {
+            iter top_res (std:reverse p.top_token_results) {
+                !tprobs = parse_probs top_res.probs;
+                !(word, prob) = get_word tprobs;
+                std:displayln ~ $F"       - {:9.7!f}: {}" prob word;
+                if cfg.m {
+                    std:displayln "          " ($F"{:6.4!f} {:3}" tprobs.0.1 tprobs.0.0);
+                    iter mp (1 => -1 top_res.min_p_tokens.res) {
+                        !mp_probs = parse_probs mp;
+                        !mpstr = $@s range 0 3 1 {
+                            if _ > 0 { $+ " | " };
+                            !mpword = mp_probs.(_).0;
+                            .mpword = "\n" => "\\n" mpword;
+                            $+ ($F"{:6.4!f} {:3}" mp_probs.(_).1 mpword);
+                        };
+                        std:displayln "          " mpstr;
+                    };
+                };
+            };
+        };
     };
     categories
 };
 
-!print_categories = {!(file, categories) = @;
-    std:displayln "SCORE:" file;
-
+!calc_scores = {!(categories) = @;
+    !cat_scores = ${};
     !keys = std:keys categories;
     std:sort { std:cmp:str:asc _ _1 } keys;
     iter cat keys {
         !p = categories.(cat).0;
         !cnt = categories.(cat).1;
-        std:displayln ~ $F"{:5.1!f} - {} [{}]" ((100.0 * p) / cnt) cat cnt;
+        cat_scores.(cat) = ${
+            score = ((100.0 * p) / cnt), category = cat, count = cnt
+        };
     };
     !global_score = $@f iter vk category_weights {
         !cat = categories.(vk.1);
@@ -194,10 +230,24 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             $+ vk.0 * cat.0 / cat.1;
         };
     };
-    std:displayln ~ $F"ALC-IQ4={:5.1!f}" 100.0 * global_score;
+    cat_scores._sorted_keys = keys;
+    cat_scores._global = 100.0 * global_score;
+    cat_scores
 };
 
-!stat_file = {!(filepath, print) = @;
+!print_categories = {!(file, categories) = @;
+    std:displayln "SCORE:" file;
+    !scores = calc_scores categories;
+
+    iter key scores._sorted_keys {
+        !score = scores.(key);
+        std:displayln ~ $F"{:5.1!f} - {} [{}]" score.score score.category score.count;
+    };
+
+    std:displayln ~ $F"ALC-IQ4={:5.1!f}" scores._global;
+};
+
+!stat_file = {!(filepath, print, print_full) = @;
     !r = std:deser:json ~ std:io:file:read_text filepath;
     !categories = ${};
 
@@ -238,7 +288,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             print_categories filepath categories;
         };
 
-        stat_prompts res.prompt categories print;
+        stat_prompts res.prompt categories print print_full;
     };
     categories
 };
@@ -295,11 +345,29 @@ if cfg._cmd == "raw_print" {
     return $n;
 };
 
-!do_print = cfg._cmd == "print";
+if cfg._cmd == "rank" {
+    !file_scores = $[];
+    iter file files {
+        !categories = stat_file file $f $f;
+        !scores = calc_scores categories;
+        scores._file = file;
+        file_scores +> scores;
+    };
+
+    std:sort { std:cmp:num:desc _._global _1._global } file_scores;
+    iter score file_scores {
+        std:displayln ~ $F"{:5.1!f} - {}" score._global score._file;
+    };
+
+    return $n;
+};
+
+!do_print = cfg._cmd == "print" &or cfg._cmd == "print_full";
 
 iter file files {
     std:displayln "FILE:" file;
-    !categories = stat_file file do_print;
+    !categories = stat_file file do_print cfg._cmd == "print_full";
     std:displayln "--------------";
     print_categories file categories;
 };
+
