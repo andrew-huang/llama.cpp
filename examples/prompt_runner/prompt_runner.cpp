@@ -2722,7 +2722,7 @@ int main(int argc, char **argv) {
 
                     std::string res = node.result_to_json().dump(
                         2, ' ', false, json::error_handler_t::replace);
-                    printf("RES: %s\n", res.c_str());
+                    //d// printf("RES: %s\n", res.c_str());
                     node_results.push_back(node.result_to_json());
                 }
 

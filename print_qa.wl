@@ -143,16 +143,16 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
 
         if print_full {
             std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
-        } {
-            if print {
-                std:displayln ~ wrap_text_char std:str:trim[last.text] 70;
-                std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
-            };
         };
 
         if not[p.payload] {
             .last = p;
             next[];
+        };
+
+        if not[print_full] &and print {
+            std:displayln ~ wrap_text_char std:str:trim[last.text] 70;
+            std:displayln ~ wrap_text_char std:str:trim[p.text] 70;
         };
 
         .last = p;
@@ -193,8 +193,8 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             iter top_res (std:reverse p.top_token_results) {
                 !tprobs = parse_probs top_res.probs;
                 !(word, prob) = get_word tprobs;
-                std:displayln ~ $F"       - {:9.7!f}: {}" prob word;
                 if cfg.m {
+                    std:displayln ~ $F"       - {:9.7!f}: {}" prob word;
                     std:displayln "          " ($F"{:6.4!f} {:3}" tprobs.0.1 tprobs.0.0);
                     iter mp (1 => -1 top_res.min_p_tokens.res) {
                         !mp_probs = parse_probs mp;
