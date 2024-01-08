@@ -728,18 +728,16 @@ struct CompletionNode {
     }
 
     std::string get_override_text(TextReplacer &replacer) {
-        std::string override_text =
-            get_completion_text(replacer) + override_text;
-        std::string ret;
+        std::string ret = get_completion_text(replacer);
         if (override_payload_key.size() > 0) {
             if (payload.find(override_payload_key) != payload.end()) {
                 std::string payl = payload.value(override_payload_key, "");
-                ret = payl + override_postfix;
+                ret = ret + payl + override_postfix;
             } else {
-                ret = override_postfix;
+                ret = ret + override_postfix;
             }
         } else {
-            ret = override_text + override_postfix;
+            ret = ret + override_text + override_postfix;
         }
 
         if (postfix.size() > 0) {
