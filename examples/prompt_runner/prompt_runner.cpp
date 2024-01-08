@@ -607,6 +607,10 @@ struct CompletionNode {
     bool no_commit;
     int index;
     std::string prefix;
+    std::string override_text;
+    std::string override_postfix;
+    std::string override_payload_key;
+    bool use_override_text;
     std::string postfix;
     json sampler_settings;
     json payload;
@@ -631,6 +635,7 @@ struct CompletionNode {
         : skip(false),
           no_commit(false),
           index(0),
+          use_override_text(false),
           gen_count(0),
           seed(-1),
           record_min_p_tokens(0.0),
@@ -663,6 +668,20 @@ struct CompletionNode {
 
         if (node.find("prefix") != node.end()) {
             prefix = node.value("prefix", "");
+        }
+
+        if (node.find("override_payload_key") != node.end()) {
+            override_payload_key = node.value("override_payload_key", "");
+            use_override_text = true;
+        }
+
+        if (node.find("override") != node.end()) {
+            override_text = node.value("override", "");
+            use_override_text = true;
+        }
+
+        if (node.find("override_postfix") != node.end()) {
+            override_postfix = node.value("override_postfix", "");
         }
 
         if (node.find("postfix") != node.end()) {
@@ -706,6 +725,28 @@ struct CompletionNode {
         if (node.find("replacements") != node.end()) {
             replacements = node["replacements"];
         }
+    }
+
+    std::string get_override_text(TextReplacer &replacer) {
+        std::string override_text =
+            get_completion_text(replacer) + override_text;
+        std::string ret;
+        if (override_payload_key.size() > 0) {
+            if (payload.find(override_payload_key) != payload.end()) {
+                std::string payl = payload.value(override_payload_key, "");
+                ret = payl + override_postfix;
+            } else {
+                ret = override_postfix;
+            }
+        } else {
+            ret = override_text + override_postfix;
+        }
+
+        if (postfix.size() > 0) {
+            ret = ret + postfix;
+        }
+
+        return ret;
     }
 
     std::string get_completion_text(TextReplacer &replacer) {
@@ -1359,6 +1400,10 @@ struct Inference {
             node.result_probs = c.tok_probabilities;
             node.result_min_p_tokens = c.min_p_tokens;
 
+            if (node.use_override_text) {
+                append_text = node.get_override_text(replacer);
+            }
+
             if (!node.no_commit) {
                 if (!append(sequence_name, append_text, true)) {
                     c.set_inference_error();
@@ -1371,6 +1416,10 @@ struct Inference {
 
             if (node.postfix.size() > 0) {
                 append_text = append_text + node.postfix;
+            }
+
+            if (node.use_override_text) {
+                append_text = node.get_override_text(replacer);
             }
 
             if (!node.no_commit) {
@@ -2187,19 +2236,17 @@ void print_status(int prompt_max_len,
     fflush(stdout);
 }
 
-void print_script_status(
-                  int i,
-                  int node_count,
-                  const std::string &log_entry,
-                  PromptRunContext &prun_ctx,
-                  Inference &infer);
+void print_script_status(int i,
+                         int node_count,
+                         const std::string &log_entry,
+                         PromptRunContext &prun_ctx,
+                         Inference &infer);
 
-void print_script_status(
-                  int i,
-                  int node_count,
-                  const std::string &log_entry,
-                  PromptRunContext &prun_ctx,
-                  Inference &infer) {
+void print_script_status(int i,
+                         int node_count,
+                         const std::string &log_entry,
+                         PromptRunContext &prun_ctx,
+                         Inference &infer) {
     float script_fraction = ((float)i) / ((float)node_count);
     int passed_time = time(NULL) - benchmark_start_time;
     float passed_tests_f =
@@ -2760,7 +2807,9 @@ int main(int argc, char **argv) {
 
                 int i = 0;
                 for (auto &node : cscript.nodes) {
-                    if (node.skip) { continue; }
+                    if (node.skip) {
+                        continue;
+                    }
 
                     infer.reset_seed(prun_ctx.seed + node.index);
 
@@ -2772,10 +2821,11 @@ int main(int argc, char **argv) {
 
                     std::string res = node.result_to_json().dump(
                         2, ' ', false, json::error_handler_t::replace);
-                    //d// printf("RES: %s\n", res.c_str());
+                    // d// printf("RES: %s\n", res.c_str());
                     node_results.push_back(node.result_to_json());
 
-                    print_script_status(i, node_count, node.result_string, prun_ctx, infer);
+                    print_script_status(
+                        i, node_count, node.result_string, prun_ctx, infer);
 
                     i++;
                 }
