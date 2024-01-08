@@ -1,3 +1,4 @@
+#!/home/weicon/devel/rust/wlambda/target/release/wlambda
 !std_opts = $[
     $["-f", :FILE, "The input JSON file, if none provided, the lastest named 'result_*.json' in the current dir is taken."],
     $["-m", "--min-p", "Prints the min-p tokens"],
@@ -23,10 +24,10 @@
     ];
 
 !category_weights = ${
-    iq4_questions = 0.4,
-    iq4_coherency_stmt_colors = 0.2,
-    iq4_coherency_topic_colors = 0.2,
-    iq4_coherency_tests = 0.2,
+    iq4_questions = 0.25,
+    iq4_coherency_stmt_colors = 0.25,
+    iq4_coherency_topic_colors = 0.25,
+    iq4_coherency_tests = 0.25,
 };
 
 !CATEGORY_LIST = map {|| _1 } category_weights;
@@ -128,7 +129,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
                     next[];
                 };
             } {
-                if is_none[p.payload] &or p.payload.category != cfg.test-id {
+                if is_none[p.payload] &or is_none[0 => cfg.category p.payload.category] {
                     .last = p;
                     next[];
                 };

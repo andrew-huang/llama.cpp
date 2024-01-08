@@ -2187,6 +2187,49 @@ void print_status(int prompt_max_len,
     fflush(stdout);
 }
 
+void print_script_status(
+                  int i,
+                  int node_count,
+                  const std::string &log_entry,
+                  PromptRunContext &prun_ctx,
+                  Inference &infer);
+
+void print_script_status(
+                  int i,
+                  int node_count,
+                  const std::string &log_entry,
+                  PromptRunContext &prun_ctx,
+                  Inference &infer) {
+    float script_fraction = ((float)i) / ((float)node_count);
+    int passed_time = time(NULL) - benchmark_start_time;
+    float passed_tests_f =
+        (((float)(prun_ctx.cur_test_nr - 1)) + script_fraction);
+    float time_per_test =
+        passed_tests_f > 0.01 ? ((float)passed_time) / passed_tests_f : 0.0;
+    float remaining =
+        time_per_test * (((float)prun_ctx.total_tests) - passed_tests_f);
+    remaining /= 60.0;
+
+    float passed_time_mins = ((float)passed_time) / 60.0;
+
+    std::string print_gen = process_text_for_console(log_entry);
+    printf(
+        "[test_id=%s, eta=%5.1fm, t=%5.1fm, seed=%ld, test_nr=%d, "
+        "total_tests=%d, turn=%d/%d, plen=%d"
+        "]: %s\n",
+        prun_ctx.test_id.c_str(),
+        remaining,
+        passed_time_mins,
+        prun_ctx.seed,
+        prun_ctx.cur_test_nr,
+        prun_ctx.total_tests,
+        i + 1,
+        node_count,
+        infer.current_max_seq_token_count(),
+        print_gen.c_str());
+    fflush(stdout);
+}
+
 // "chat": {
 //   "user": {
 //       "prompt": "<PROMPT2><CHATLOG>Loki: ",
@@ -2709,8 +2752,15 @@ int main(int argc, char **argv) {
 
                 json node_results;
 
+                int node_count = 0;
                 for (auto &node : cscript.nodes) {
                     if (node.skip) continue;
+                    node_count += 1;
+                };
+
+                int i = 0;
+                for (auto &node : cscript.nodes) {
+                    if (node.skip) { continue; }
 
                     infer.reset_seed(prun_ctx.seed + node.index);
 
@@ -2724,6 +2774,10 @@ int main(int argc, char **argv) {
                         2, ' ', false, json::error_handler_t::replace);
                     //d// printf("RES: %s\n", res.c_str());
                     node_results.push_back(node.result_to_json());
+
+                    print_script_status(i, node_count, node.result_string, prun_ctx, infer);
+
+                    i++;
                 }
 
                 //                json prompt_collection;
