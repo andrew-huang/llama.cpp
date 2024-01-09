@@ -627,6 +627,8 @@ struct CompletionNode {
     std::vector<std::pair<std::string, float>> result_probs;
     json top_token_results;
     std::string result_string;
+    std::string result_raw;
+    std::string result_context;
     int prompt_token_count;
     json result_sampler;
     json result_min_p_tokens;
@@ -775,6 +777,8 @@ struct CompletionNode {
     json result_to_json() {
         json res;
         res["text"] = result_string;
+        res["raw"] = result_raw;
+        res["context"] = result_context;
         res["prompt_token_count"] = prompt_token_count;
         res["probs"] = probs_to_string(result_probs);
         if (!payload.is_null()) {
@@ -1390,6 +1394,7 @@ struct Inference {
                                               c.min_p_tokens);
                 }
 
+                node.result_raw = c.raw;
                 node.result_string = append_text;
                 node.result_sampler = sparams_to_json(test_sparams);
             }
@@ -1403,6 +1408,7 @@ struct Inference {
             }
 
             if (!node.no_commit) {
+                node.result_context = append_text;
                 if (!append(sequence_name, append_text, true)) {
                     c.set_inference_error();
                     return c;
@@ -1420,6 +1426,8 @@ struct Inference {
                 append_text = node.get_override_text(replacer);
             }
 
+            node.result_raw = append_text;
+            node.result_context = append_text;
             if (!node.no_commit) {
                 if (!append(sequence_name, append_text)) {
                     c.set_inference_error();

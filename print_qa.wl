@@ -17,6 +17,8 @@
     :raw_print => $[*std_opts]
     :print => $[*std_opts]
     :print_full => $[*std_opts]
+    :top_token => $[*std_opts]
+    :cmpshot => $[*std_opts]
     :rank => $[*std_opts]
     :list => $[
         $["-t", :TOP_N, $o(1)],
@@ -74,7 +76,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     !word = "";
     !prob = 1.0;
     iter p probs {
-        if p.0 &> $r/$^$+[a-zA-Z]$$/ {
+        if p.0 &> $r/$^$?\ $+[a-zA-Z]$$/ {
             .word +>= p.0;
             .prob *= p.1;
         } {
@@ -116,12 +118,65 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     text
 };
 
+!print_next_token = {!(p, print_full) = @;
+    if is_some[cfg.category] {
+        if p.payload.topic != cfg.category {
+            return $n;
+        };
+    };
+
+    !probs = parse_probs p.min_p_tokens.res.0;
+    !header = "";
+    !numbers = "";
+    !i = 0;
+    iter t probs {
+        .header +>= $F" {:>6} |" std:str:trim[t.0];
+        .numbers +>= $F" {:6.4!f} |" t.1;
+        .i += 1;
+        if i >= 10 {
+            break[];
+        };
+    };
+    std:displayln p.payload.category p.payload.topic;
+    std:displayln "   " ("|" header);
+    std:displayln "   " ("|" numbers);
+    !(word, prob) = get_word probs;
+
+    if is_none[p.top_token_results] {
+        return $n;
+    };
+
+    iter top_res (std:reverse p.top_token_results) {
+        !tprobs = parse_probs top_res.probs;
+        !(word, prob) = get_word tprobs;
+        if cfg.m {
+            std:displayln ~ $F"    - {:9.7!f}: {}" prob (std:str:trim word);
+#            std:displayln "          " ($F"{:6.4!f} {:3}" tprobs.0.1 tprobs.0.0);
+#            iter mp (1 => -1 top_res.min_p_tokens.res) {
+#                !mp_probs = parse_probs mp;
+#                !mpstr = $@s range 0 3 1 {
+#                    if _ > 0 { $+ " | " };
+#                    !mpword = mp_probs.(_).0;
+#                    .mpword = "\n" => "\\n" mpword;
+#                    $+ ($F"{:6.4!f} {:3}" mp_probs.(_).1 mpword);
+#                };
+#                std:displayln "          " mpstr;
+#            };
+        };
+    };
+};
+
 !stat_prompts = {|1<4| !(prompts, categories, print, print_full) = @;
     is_none[categories] { .categories = ${} };
 
     !last = $n;
     iter p prompts {
 #        std:displayln ~ std:ser:json p;
+        if is_some[p.payload] &and p.payload.category == "next_token" {
+            print_next_token p print_full;
+            next[];
+        };
+
         if is_some[cfg.category] {
             if cfg.category &> $r/$^$+[0-9]$$/ {
                 if is_none[p.payload] &or p.payload.category != CATEGORY_LIST.(int cfg.category) {
@@ -172,23 +227,25 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
 
         !expected = std:str:to_lowercase p.payload.expected;
 
-        !judgement = if std:str:to_lowercase[word] != expected {
-            categories.(p.payload.category).1 += 1;
-            "FAIL";
-        } {
-            categories.(p.payload.category).0 += prob;
-            categories.(p.payload.category).1 += 1;
-
-            if prob < 0.8 {
-                "UGLY"
-            } ~ if prob < 0.9 {
-                "BAD";
+        if len[expected] > 0 {
+            !judgement = if std:str:to_lowercase[word] != expected {
+                categories.(p.payload.category).1 += 1;
+                "FAIL";
             } {
-                "OK"
+                categories.(p.payload.category).0 += prob;
+                categories.(p.payload.category).1 += 1;
+
+                if prob < 0.8 {
+                    "UGLY"
+                } ~ if prob < 0.9 {
+                    "BAD";
+                } {
+                    "OK"
+                };
             };
-        };
-        if print {
-            std:displayln "^^^^" ($F"{:4} expected: {}, got: {} @ {:9.7} | context={:4}" judgement p.payload.expected word prob p.prompt_token_count);
+            if print {
+                std:displayln "^^^^" ($F"{:4} expected: {}, got: {} @ {:9.7} | context={:4}" judgement p.payload.expected word prob p.prompt_token_count);
+            };
         };
 
         if is_some[p.top_token_results] {
@@ -249,27 +306,40 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     std:displayln ~ $F"ALC-IQ4={:5.1!f}" scores._global;
 };
 
-!stat_file = {!(filepath, print, print_full) = @;
-    !r = std:deser:json ~ std:io:file:read_text filepath;
-    !categories = ${};
+!print_compare_categories = {!(file, zero_shot_cats, n_shot_cats) = @;
+    std:displayln "CMP SCORE:" file;
+    !z_scores = calc_scores zero_shot_cats;
+    !n_scores = calc_scores n_shot_cats;
 
-    !seeds = $@map iter r r.results { $+ str[r.seed] $t; };
+    std:displayln ~ $F" {:5} {:5}" "zero" "n-";
+    iter key z_scores._sorted_keys {
+        !z_score = z_scores.(key);
+        !n_score = n_scores.(key);
+        std:displayln ~ $F"{:5.1!f} {:5.1!f} - {} [{}]" z_score.score n_score.score z_score.category z_score.count;
+    };
+
+    std:displayln ~ $F"ALC-IQ4={:5.1!f} {:5.1!f}" z_scores._global n_scores._global;
+};
+
+!filter_results = {!(results) = @;
+    !seeds = $@map iter r results { $+ str[r.seed] $t; };
     .seeds = map {|| _1 } seeds;
     std:sort { std:cmp:num:asc _ _1 } seeds;
 
-    !test_ids = $@map iter r r.results { $+ r.test_id $t; };
+    !test_ids = $@map iter r results { $+ r.test_id $t; };
     .test_ids = map {|| _1 } test_ids;
     std:sort { std:cmp:str:asc _ _1 } test_ids;
 
-    iter res r.results {
+    filter {
+        !res = _;
         if is_some[cfg.test-id] {
             if cfg.test-id &> $r/$^$+[0-9]$$/ {
                 if res.test_id != test_ids.(int cfg.test-id) {
-                    next[];
+                    return $f;
                 };
             } {
-                if res.test_id != cfg.test-id {
-                    next[];
+                if is_none[0 => cfg.test-id res.test_id] {
+                    return $f;
                 };
             };
         };
@@ -280,12 +350,21 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
                 .check_seed = seeds.(int[cfg.seed]);
             };
             if str[res.seed] != check_seed {
-                next[];
+                return $f;
             };
         };
 
+        return $t;
+    } results
+};
+
+!stat_file = {!(filepath, print, print_full) = @;
+    !r = std:deser:json ~ std:io:file:read_text filepath;
+    !categories = ${};
+
+    iter res (filter_results r.results) {
         if cfg.tree {
-            std:displayln ~ $F"seed={:<10} - {}" res.seed res.test_id ;
+            std:displayln ~ $F"seed={:<10} - {}" res.seed res.test_id;
             !categories = stat_prompts res.prompt;
             print_categories filepath categories;
         };
@@ -293,6 +372,23 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
         stat_prompts res.prompt categories print print_full;
     };
     categories
+};
+
+!compare_shots = {!(filepath) = @;
+    !r = std:deser:json ~ std:io:file:read_text filepath;
+
+    !results = filter_results r.results;
+    !zero_shot = filter { is_none[0 => "nshot" _.test_id] } results;
+    !n_shot = filter { is_some[0 => "nshot" _.test_id] } results;
+
+    !cmp_res = ${ n_shot = ${}, zero_shot = ${} };
+    iter res zero_shot {
+        stat_prompts res.prompt cmp_res.zero_shot $f $f;
+    };
+    iter res n_shot {
+        stat_prompts res.prompt cmp_res.n_shot $f $f;
+    };
+    cmp_res
 };
 
 if cfg._cmd == "list" {
@@ -339,7 +435,7 @@ if cfg._cmd == "raw_print" {
         std:displayln "FILE:" file;
         !r = std:deser:json ~ std:io:file:read_text file;
         iter res r.results {
-            std:displayln "### START ################";
+            std:displayln "### START ####" res.test_id;
             std:displayln res.response;
             std:displayln "### END ################";
         };
@@ -364,12 +460,67 @@ if cfg._cmd == "rank" {
     return $n;
 };
 
+if cfg._cmd == "top_token" {
+    !for_next_token = {
+        is_some[_.payload] &and _.payload.category == "next_token"
+    };
+
+    std:displayln ~ $F"| {:40} | {:>6} | {:>6} | {:>6} | {:>6} | {:>6} |" "Model" "Raw" "Raw" "Alpaca" "AlpInp" "Min";
+    std:displayln ~ $F"|------|------:|------:|------:|------:|------:|"[];
+    !data = $@vec iter file files {
+        !r = std:deser:json ~ std:io:file:read_text file;
+        !categories = ${};
+
+        !(_, name) = file &> $r/result_$*[0-9]_(^$<*?)$?\.gguf*$$/;
+
+            !tops = $[];
+        iter res (filter_results r.results) {
+            iter p (filter for_next_token res.prompt) {
+                !probs = parse_probs p.min_p_tokens.res.0;
+                .probs = filter { std:str:to_lowercase[std:str:trim _.0] == "her" } probs;
+                if len[probs] == 0 {
+                    .probs = $[:her => 0.0];
+                };
+                tops +> probs.0.1;
+            };
+        };
+        !min = 9990.0;
+        iter t tops { .min = std:min min t };
+        $+ $[ name, tops.0, tops.1, tops.2, tops.3, min ];
+    };
+
+    std:sort { std:cmp:num:asc _.5 _1.5 } data;
+
+    iter d data {
+        std:displayln ~
+            $F"| {:40} | {:6.4!f} | {:6.4!f} | {:6.4!f} | {:6.4!f} | {:6.4!f} |"
+                d.0
+                d.1
+                d.2
+                d.3
+                d.4
+                d.5
+        ;
+    };
+    return $n;
+};
+
+if cfg._cmd == "cmpshot" {
+    iter file files {
+        !cmp_res = compare_shots file;
+        print_compare_categories file cmp_res.zero_shot cmp_res.n_shot;
+    };
+    return $n;
+};
+
 !do_print = cfg._cmd == "print" &or cfg._cmd == "print_full";
 
 iter file files {
     std:displayln "FILE:" file;
     !categories = stat_file file do_print cfg._cmd == "print_full";
     std:displayln "--------------";
-    print_categories file categories;
+    if (len categories) > 0 {
+        print_categories file categories;
+    };
 };
 
