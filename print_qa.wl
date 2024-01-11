@@ -118,14 +118,8 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     text
 };
 
-!print_next_token = {!(p, print_full) = @;
-    if is_some[cfg.category] {
-        if p.payload.topic != cfg.category {
-            return $n;
-        };
-    };
-
-    !probs = parse_probs p.min_p_tokens.res.0;
+!print_min_p_table = {!(minp_res) = @;
+    !probs = parse_probs minp_res;
     !header = "";
     !numbers = "";
     !i = 0;
@@ -137,20 +131,34 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
             break[];
         };
     };
-    std:displayln p.payload.category p.payload.topic;
     std:displayln "   " ("|" header);
     std:displayln "   " ("|" numbers);
-    !(word, prob) = get_word probs;
+
+};
+
+!print_next_token = {!(p, print_full) = @;
+    if is_some[cfg.category] {
+        if p.payload.topic != cfg.category {
+            return $n;
+        };
+    };
+
+    std:displayln (p.payload.category " " p.payload.topic);
+    iter pp p.min_p_tokens.res {
+        print_min_p_table  pp;
+    };
 
     if is_none[p.top_token_results] {
         return $n;
     };
 
+    !sum = 0.0;
     iter top_res (std:reverse p.top_token_results) {
         !tprobs = parse_probs top_res.probs;
         !(word, prob) = get_word tprobs;
         if cfg.m {
             std:displayln ~ $F"    - {:9.7!f}: {}" prob (std:str:trim word);
+            .sum += prob;
 #            std:displayln "          " ($F"{:6.4!f} {:3}" tprobs.0.1 tprobs.0.0);
 #            iter mp (1 => -1 top_res.min_p_tokens.res) {
 #                !mp_probs = parse_probs mp;
@@ -164,6 +172,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
 #            };
         };
     };
+    std:displayln ~ $F" sum: {:9.7!f}" sum;
 };
 
 !stat_prompts = {|1<4| !(prompts, categories, print, print_full) = @;
