@@ -1,7 +1,7 @@
 QFILE=/home/weicon/textgen/qtest/pack_erp4_chat_prompt/iq4_prompt_config.json
 #TESTS="[\"batch_1\\\"\,\"nshot_1\"]"
-#TESTS="[\"sarah\"]"
-TESTS="[\"tom_\"]"
+TESTS="[\"sarah\"]"
+#TESTS="[\"tom_\"]"
 sh run_cp.sh /mnt/old/root/new_data/silicon-maid-7b.Q6_K.gguf $QFILE "$TESTS"
 sh run_cp.sh /mnt/old/root/new_data/starling-lm-7b-alpha.Q6_K.gguf $QFILE "$TESTS"
 sh run_cp.sh /mnt/p_ml/vigostral-7b-chat.Q5_K_M.gguf $QFILE "$TESTS"
