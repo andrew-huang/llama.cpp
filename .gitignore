@@ -49,8 +49,10 @@ models-mnt
 /prompt_runner
 /llava-cli
 /lookahead
+/lookup
 /main
 /metal
+/passkey
 /perplexity
 /q8dot
 /quantize

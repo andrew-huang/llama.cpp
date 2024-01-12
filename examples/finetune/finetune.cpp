@@ -3,15 +3,9 @@
 #include "llama.h"
 #include "common.h"
 #include "train.h"
-#include <unordered_map>
 #include <vector>
-#include <cassert>
-#include <climits>
 #include <cstring>
-#include <cstdarg>
 #include <ctime>
-#include <random>
-#include <stdexcept>
 #include <algorithm>
 #include <string>
 
@@ -196,13 +190,13 @@ static const char * LLM_TENSOR_FFN_DOWN      = "blk.%d.ffn_down";
 static const char * LLM_TENSOR_FFN_UP        = "blk.%d.ffn_up";
 
 static void print_params(struct my_llama_hparams * params) {
-    printf("%s: n_vocab:   %u\n", __func__, params->n_vocab);
-    printf("%s: n_ctx:     %u\n", __func__, params->n_ctx);
-    printf("%s: n_embd:    %u\n", __func__, params->n_embd);
-    printf("%s: n_ff:      %u\n", __func__, params->n_ff);
-    printf("%s: n_head:    %u\n", __func__, params->n_head);
-    printf("%s: n_head_kv: %u\n", __func__, params->n_head_kv);
-    printf("%s: n_layer:   %u\n", __func__, params->n_layer);
+    printf("%s: n_vocab               : %u\n", __func__, params->n_vocab);
+    printf("%s: n_ctx                 : %u\n", __func__, params->n_ctx);
+    printf("%s: n_embd                : %u\n", __func__, params->n_embd);
+    printf("%s: n_ff                  : %u\n", __func__, params->n_ff);
+    printf("%s: n_head                : %u\n", __func__, params->n_head);
+    printf("%s: n_head_kv             : %u\n", __func__, params->n_head_kv);
+    printf("%s: n_layer               : %u\n", __func__, params->n_layer);
     printf("%s: norm_rms_eps          : %f\n", __func__, params->f_norm_rms_eps);
     printf("%s: rope_freq_base        : %f\n", __func__, params->rope_freq_base);
     printf("%s: rope_freq_scale       : %f\n", __func__, params->rope_freq_scale);
