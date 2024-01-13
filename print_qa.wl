@@ -20,6 +20,10 @@
     :top_token => $[*std_opts]
     :cmpshot => $[*std_opts]
     :rank => $[*std_opts]
+    :extract => $[
+        *std_opts,
+        $["--output", "-o", :FILE, :$required, "The output JSON for the extraction, %T in the filename will be replaced by a timestamp."],
+    ]
     :list => $[
         $["-t", :TOP_N, $o(1)],
         $["-f", :FILE, "The input JSON file, if none provided, the lastest named 'result_*.json' in the current dir is taken."],
@@ -41,7 +45,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
 } {
     !files = $[];
     std:fs:read_dir "." {
-        if _.name &> $r/$^result_*\.json$$/ {
+        if _.name &> $r/$^result_*\.json$$/ &or _.name &> $r/$^response_IQ4_*.json$$/ {
             if is_some[cfg.file-match] {
                 if is_some[0 => cfg.file-match _.path] {
                     files +> _.mtime => _.path;
@@ -173,6 +177,28 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
         };
     };
     std:displayln ~ $F" sum: {:9.7!f}" sum;
+};
+
+!filter_prompt = {!p = _;
+    if is_some[cfg.category] {
+        if cfg.category &> $r/$^$+[0-9]$$/ {
+            if is_none[p.payload] &or p.payload.category != CATEGORY_LIST.(int cfg.category) {
+                return $f;
+            };
+        } {
+            if is_none[p.payload] &or is_none[0 => cfg.category p.payload.category] {
+                return $f;
+            };
+        };
+    };
+
+    if is_some[cfg.topic] {
+        if is_none[p.payload] &or is_none[0 => cfg.topic p.payload.topic] {
+            return $f;
+        };
+    };
+
+    $t
 };
 
 !stat_prompts = {|1<4| !(prompts, categories, print, print_full) = @;
@@ -437,6 +463,40 @@ if cfg._cmd == "list" {
         std:displayln "Seeds:";
         iter t seeds \std:displayln "   " t;
     };
+};
+
+if cfg._cmd == "extract" {
+    !output = ${};
+
+    !fcount = 0;
+    iter file files {
+        !r = std:deser:json ~ std:io:file:read_text file;
+        !count = 0;
+        !test_settings = 
+
+        iter res (filter_results r.results) {
+            iter p (filter filter_prompt res.prompt) {
+                if p.payload {
+                    output.(r.model_file) //= $[];
+                    output.(r.model_file) +> ${
+                        nodes = map { _.raw } res.prompt,
+                        seed = res.seed,
+                        text = p.text,
+                    };
+                    .count += 1;
+                };
+            };
+        };
+        std:displayln "extracted" count "from" r.model_file;
+        .fcount += 1;
+    };
+    std:displayln "extracted from" fcount "files";
+
+    !ts = std:chrono:timestamp "%Y%m%d_%H%M%S";
+    !outfilepath = "%T" => ts cfg.output;
+    std:io:file:write_safe outfilepath ~ std:ser:json output;
+    std:displayln "wrote to" outfilepath;
+    return $n;
 };
 
 if cfg._cmd == "raw_print" {
