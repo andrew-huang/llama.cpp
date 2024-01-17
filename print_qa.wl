@@ -540,7 +540,7 @@ if cfg._cmd == "top_token" {
         !r = std:deser:json ~ std:io:file:read_text file;
         !categories = ${};
 
-        !(_, name) = file &> $r/result_$*[0-9]_(^$<*?)$?\.gguf*$$/;
+        !name = r.model_file;
 
             !tops = $[];
         iter res (filter_results r.results) {

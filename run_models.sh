@@ -1,4 +1,4 @@
-QFILE=/home/weicon/textgen/qtest/pack_erp4_chat_prompt/iq4_prompt_config.json
+QFILE=/home/weicon/textgen/qtest/pod_broker_dev/iq4_prompt_config.json
 #TESTS="[\"batch_1\\\"\,\"nshot_1\"]"
 TESTS="[\"sarah\"]"
 #TESTS="[\"tom_\"]"
@@ -32,3 +32,4 @@ sh run_13b.sh /mnt/p_ml/Unholy-v1.1-13B.q5_K_M.gguf $QFILE "$TESTS"
 sh run_13b.sh /mnt/p_ml/Stheno-1.8-L2-13B.q5_K_M.gguf $QFILE "$TESTS"
 sh run_13b.sh /mnt/p_ml/Utopia-13B.q5_k_m.gguf $QFILE "$TESTS"
 sh run_13b.sh /mnt/p_ml/cat-v1.0-13b.Q5_K_M.gguf $QFILE "$TESTS"
+sh run_13b.sh /mnt/old/root/new_data/baku-13b-v2-q5_K_M.gguf $QFILE "$TESTS"
