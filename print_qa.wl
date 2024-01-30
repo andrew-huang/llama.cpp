@@ -1,6 +1,7 @@
 #!/home/weicon/devel/rust/wlambda/target/release/wlambda
 !std_opts = $[
     $["-f", :FILE, "The input JSON file, if none provided, the lastest named 'result_*.json' in the current dir is taken."],
+    $["-d", :DIR, $o("."), "The directory to read the files from."],
     $["-m", "--min-p", "Prints the min-p tokens"],
     $["--file-match", :MATCH, "substring of the filenames that are considered"],
     $["--test-id", :TEST_ID, "Selects only the results with this test ID (you can give an index, to select the first, second, ... test-id)"],
@@ -44,7 +45,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     $[cfg.f]
 } {
     !files = $[];
-    std:fs:read_dir "." {
+    std:fs:read_dir cfg.d {
         if _.name &> $r/$^result_*\.json$$/ &or _.name &> $r/$^response_IQ4_*.json$$/ {
             if is_some[cfg.file-match] {
                 if is_some[0 => cfg.file-match _.path] {
@@ -208,7 +209,9 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
     iter p prompts {
 #        std:displayln ~ std:ser:json p;
         if is_some[p.payload] &and p.payload.category == "next_token" {
-            print_next_token p print_full;
+            if print {
+                print_next_token p print_full;
+            };
             next[];
         };
 
@@ -406,7 +409,7 @@ std:sort { std:cmp:str:asc _ _1 } CATEGORY_LIST;
 
         stat_prompts res.prompt categories print print_full;
     };
-    categories
+    r.model_file => categories
 };
 
 !compare_shots = {!(filepath) = @;
@@ -515,15 +518,15 @@ if cfg._cmd == "raw_print" {
 if cfg._cmd == "rank" {
     !file_scores = $[];
     iter file files {
-        !categories = stat_file file $f $f;
+        !(model_file, categories) = stat_file file $f $f;
         !scores = calc_scores categories;
-        scores._file = file;
+        scores._file = model_file;
         file_scores +> scores;
     };
 
     std:sort { std:cmp:num:desc _._global _1._global } file_scores;
     iter score file_scores {
-        std:displayln ~ $F"{:5.1!f} - {}" score._global score._file;
+        std:displayln ~ $F"{:6.2!f};{}" score._global score._file;
     };
 
     return $n;
@@ -586,7 +589,7 @@ if cfg._cmd == "cmpshot" {
 
 iter file files {
     std:displayln "FILE:" file;
-    !categories = stat_file file do_print cfg._cmd == "print_full";
+    !(model_file, categories) = stat_file file do_print cfg._cmd == "print_full";
     std:displayln "--------------";
     if (len categories) > 0 {
         print_categories file categories;
