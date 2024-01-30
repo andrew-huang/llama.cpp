@@ -42,6 +42,9 @@ Here is an example how this config file should look like:
         ]
     }
 
+**Note: You can find the official ALC-IQ3 `prompt_runner_config.json` in the same directory
+as this README file.**
+
 `"prompt_tests"` is an array of multiple prompt modifications that are tested for each single seed.
 The `"id"` is used to identify the test in the generated `result_<timestamp>.json`.
 
